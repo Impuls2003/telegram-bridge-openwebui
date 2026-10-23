@@ -17,7 +17,7 @@ services:
       # Health endpoint — bound to all interfaces so Docker healthcheck (which runs
       # *inside* the container's network namespace via `docker inspect`) works.
       # Safe to expose externally too: it's read-only and returns just the model name.
-      - "8088:8088"
+      - "127.0.0.1:8088:8088"
       # /api/outbound — bound to 127.0.0.1 INSIDE the container by default.
       # The OWUI tool runs in Open WebUI (sibling container or host), so it can
       # reach this on host.docker.internal:8089. Do NOT expose 8089 to the host.
