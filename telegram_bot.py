@@ -268,7 +268,7 @@ class OpenWebUI:
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "chat_id": chat_id,
+            #"chat_id": chat_id,
             "stream": stream,
             "metadata": {"chat_id": chat_id},
         }
