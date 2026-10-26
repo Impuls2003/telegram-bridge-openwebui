@@ -71,6 +71,10 @@ CONNECTED_TOOLS: list[str] = list(
         if tool_id.strip()
     )
 )
+LINK_TO_CHAT_IN_EVERY_MESSAGE: bool = (
+    os.environ.get("LINK_TO_CHAT_IN_EVERY_MESSAGE", "true").strip().lower()
+    not in {"false", "0", "no", "off"}
+)
 REQUEST_TIMEOUT: float = float(os.environ.get("REQUEST_TIMEOUT", "120"))
 SESSIONS_FILE: str = os.environ.get("SESSIONS_FILE", "/app/data/sessions.json")
 WEBHOOK_URL: str = os.environ.get("WEBHOOK_URL", "").rstrip("/")
@@ -1005,8 +1009,9 @@ async def _stream_reply_to_telegram(
 ) -> Optional[int]:
     """Edit a placeholder message as tokens arrive, then chunk if needed.
 
-    Returns the message_id of the LAST message sent (the backlink), so the
-    caller can record it as the user's "last outbound" for continuity.
+    Returns a Telegram message id for the caller to record as the user's
+    "last outbound" for continuity. This is the backlink if enabled, otherwise
+    the final response message.
     """
     placeholder = await update.message.reply_text("…")
     accumulated = ""
@@ -1023,6 +1028,7 @@ async def _stream_reply_to_telegram(
                 log.warning("Could not update Telegram response preview: %s", e)
             last_edit = now
 
+    last_response_message_id = placeholder.message_id
     if not accumulated.strip():
         log.warning(
             "Open WebUI stream contained no text for chat %s; checking saved chat",
@@ -1043,16 +1049,22 @@ async def _stream_reply_to_telegram(
             await placeholder.edit_text(chunks[0])
         except Exception as e:
             log.warning("Could not replace Telegram response placeholder: %s", e)
-            await update.message.reply_text(chunks[0])
+            first_response = await update.message.reply_text(chunks[0])
+            last_response_message_id = first_response.message_id
 
-    for extra in chunks[1:]:
-        await update.message.reply_text(extra)
+    if chunks and len(chunks) > 1:
+        for extra in chunks[1:]:
+            extra_msg = await update.message.reply_text(extra)
+            last_response_message_id = extra_msg.message_id
 
-    chat_url = f"{OPENWEBUI_BASE_URL}/c/{chat_id}"
-    backlink_msg = await update.message.reply_text(
-        f"🔗 {chat_url}", disable_web_page_preview=True,
-    )
-    return backlink_msg.message_id
+    if LINK_TO_CHAT_IN_EVERY_MESSAGE:
+        chat_url = f"{OPENWEBUI_BASE_URL}/c/{chat_id}"
+        backlink_msg = await update.message.reply_text(
+            f"🔗 {chat_url}", disable_web_page_preview=True,
+        )
+        return backlink_msg.message_id
+
+    return last_response_message_id
 
 
 @authorized
