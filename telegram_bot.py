@@ -64,6 +64,13 @@ DEFAULT_SYSTEM_PROMPT: str = os.environ.get("DEFAULT_SYSTEM_PROMPT", "")
 ALLOWED_USER_IDS: set[int] = {
     int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").split(",") if x.strip()
 }
+CONNECTED_TOOLS: list[str] = list(
+    dict.fromkeys(
+        tool_id.strip()
+        for tool_id in os.environ.get("CONNECTED_TOOLS", "").split(",")
+        if tool_id.strip()
+    )
+)
 REQUEST_TIMEOUT: float = float(os.environ.get("REQUEST_TIMEOUT", "120"))
 SESSIONS_FILE: str = os.environ.get("SESSIONS_FILE", "/app/data/sessions.json")
 WEBHOOK_URL: str = os.environ.get("WEBHOOK_URL", "").rstrip("/")
@@ -340,6 +347,8 @@ class OpenWebUI:
             payload["user_message"] = user_message
         if file_ids:
             payload["files"] = [image_file_ref(fid) for fid in file_ids]
+        if CONNECTED_TOOLS:
+            payload["tool_ids"] = CONNECTED_TOOLS
 
         if stream:
             return self._stream(payload)
