@@ -345,6 +345,19 @@ class OpenWebUI:
                             yield delta
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+            # A final SSE frame may not end with a newline, so it remains in
+            # the buffer after aiter_text() finishes.
+            line = buffer.strip()
+            if line.startswith("data:"):
+                data = line[5:].strip()
+                if data and data != "[DONE]":
+                    try:
+                        obj = json.loads(data)
+                        delta = obj["choices"][0].get("delta", {}).get("content", "")
+                        if isinstance(delta, str) and delta:
+                            yield delta
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        pass
 
     async def upload_file(self, file_bytes: bytes, filename: str) -> str:
         """Upload a binary file to OWUI and return its file id."""
@@ -357,6 +370,31 @@ class OpenWebUI:
             r = await c.post("/api/v1/files/", files=files)
             r.raise_for_status()
             return r.json()["id"]
+
+    async def get_latest_assistant_text(self, chat_id: str) -> str:
+        """Read the latest assistant text from a saved chat."""
+        r = await self._client.get(f"/api/v1/chats/{chat_id}")
+        r.raise_for_status()
+        data = r.json()
+        chat = data.get("chat", data)
+        history = chat.get("history", {})
+        history_messages = history.get("messages", {})
+
+        current_id = history.get("currentId")
+        if current_id and isinstance(history_messages, dict):
+            current = history_messages.get(current_id, {})
+            if current.get("role") == "assistant" and isinstance(current.get("content"), str):
+                if current["content"].strip():
+                    return current["content"]
+
+        messages = chat.get("messages", [])
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if message.get("role") == "assistant":
+                    content = message.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return content
+        return ""
 
 
 owui = OpenWebUI(OPENWEBUI_BASE_URL, OPENWEBUI_API_KEY)
@@ -913,15 +951,32 @@ async def _stream_reply_to_telegram(
             preview = accumulated if len(accumulated) <= 4000 else accumulated[-4000:]
             try:
                 await placeholder.edit_text(preview + " …")
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("Could not update Telegram response preview: %s", e)
             last_edit = now
 
-    chunks = chunk_message(accumulated)
-    try:
-        await placeholder.edit_text(chunks[0])
-    except Exception:
-        pass
+    if not accumulated.strip():
+        log.warning(
+            "Open WebUI stream contained no text for chat %s; checking saved chat",
+            chat_id,
+        )
+        try:
+            accumulated = await owui.get_latest_assistant_text(chat_id)
+        except Exception as e:
+            log.warning("Could not retrieve saved Open WebUI response: %s", e)
+
+    if not accumulated.strip():
+        log.error("No assistant text was available for Telegram (chat %s)", chat_id)
+        await placeholder.edit_text("⚠️ Open WebUI returned no readable response text.")
+        chunks = []
+    else:
+        chunks = chunk_message(accumulated)
+        try:
+            await placeholder.edit_text(chunks[0])
+        except Exception as e:
+            log.warning("Could not replace Telegram response placeholder: %s", e)
+            await update.message.reply_text(chunks[0])
+
     for extra in chunks[1:]:
         await update.message.reply_text(extra)
 
