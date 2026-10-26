@@ -396,6 +396,36 @@ class OpenWebUI:
                         return content
         return ""
 
+    async def get_current_message_id(self, chat_id: str) -> Optional[str]:
+        """Return the active leaf message ID to use as the next turn's parent."""
+        r = await self._client.get(f"/api/v1/chats/{chat_id}")
+        r.raise_for_status()
+        data = r.json()
+        chat = data.get("chat", data)
+        history = chat.get("history", {})
+        current_id = history.get("currentId")
+        if current_id:
+            return str(current_id)
+
+        messages = history.get("messages", {})
+        if isinstance(messages, dict):
+            assistant_messages = [
+                message for message in messages.values()
+                if isinstance(message, dict)
+                and message.get("role") == "assistant"
+                and message.get("id")
+            ]
+            if assistant_messages:
+                latest = max(assistant_messages, key=lambda item: item.get("timestamp", 0))
+                return str(latest["id"])
+
+        messages = chat.get("messages", [])
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if isinstance(message, dict) and message.get("role") == "assistant" and message.get("id"):
+                    return str(message["id"])
+        return None
+
 
 owui = OpenWebUI(OPENWEBUI_BASE_URL, OPENWEBUI_API_KEY)
 
@@ -1006,9 +1036,26 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if target_chat_id:
             chat_id = target_chat_id
             sessions.update(user.id, chat_id=chat_id)
+            parent_message_id = await owui.get_current_message_id(chat_id)
+            if not parent_message_id:
+                raise RuntimeError(
+                    f"Open WebUI chat {chat_id} has no active message to continue"
+                )
+            assistant_message_id = str(uuid.uuid4())
+            user_message = {
+                "id": str(uuid.uuid4()),
+                "parentId": parent_message_id,
+                "childrenIds": [assistant_message_id],
+                "role": "user",
+                "content": text,
+                "models": [model.name],
+                "timestamp": int(time.time()),
+            }
             stream = await owui.complete(
                 chat_id, model.name, text,
                 system_prompt=session.system_prompt,
+                assistant_message_id=assistant_message_id,
+                user_message=user_message,
                 stream=True,
             )
         else:
