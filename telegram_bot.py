@@ -283,6 +283,16 @@ class OpenWebUI:
 
     async def _stream(self, payload: dict[str, Any]) -> AsyncIterator[str]:
         async with self._client.stream("POST", "/api/chat/completions", json=payload) as resp:
+            if resp.is_error:
+                # The response body often explains whether this is a routing,
+                # model, or chat-ownership error. Read it before raising so it
+                # remains available to the caller and in the logs.
+                body = (await resp.aread()).decode("utf-8", errors="replace")
+                log.error(
+                    "Open WebUI streaming request failed: HTTP %d: %s",
+                    resp.status_code,
+                    body[:1000],
+                )
             resp.raise_for_status()
             buffer = ""
             async for chunk in resp.aiter_text():
@@ -939,7 +949,16 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    last_tg_msg_id = await _stream_reply_to_telegram(update, chat_id, stream)
+    try:
+        last_tg_msg_id = await _stream_reply_to_telegram(update, chat_id, stream)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else "unknown"
+        body = e.response.text[:2500] if e.response is not None else str(e)
+        log.error("Open WebUI streaming request failed (HTTP %s): %s", status, body)
+        await update.message.reply_text(
+            f"❌ Open WebUI returned HTTP {status}\n{body}"
+        )
+        return
     # Stamp this as the user's "last outbound" so a future plain (non-reply)
     # message within LAST_OUTBOUND_TTL_SECONDS continues this chat.
     if last_tg_msg_id:
