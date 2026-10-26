@@ -117,6 +117,11 @@ def chunk_message(text: str, max_len: int = 3500) -> list[str]:
 
 def image_file_ref(file_id: str) -> dict[str, str]:
     """Build an Open WebUI chat reference for an uploaded image."""
+    # Some Open WebUI versions return the content URL in `id` rather than a
+    # bare file id. Reduce either form to the actual id before building URLs.
+    file_id = str(file_id).strip()
+    if "/api/v1/files/" in file_id:
+        file_id = file_id.rsplit("/api/v1/files/", 1)[1].split("/", 1)[0]
     return {
         "type": "image",
         "id": file_id,
@@ -389,7 +394,10 @@ class OpenWebUI:
             files = {"file": (filename, file_bytes)}
             r = await c.post("/api/v1/files/", files=files)
             r.raise_for_status()
-            return r.json()["id"]
+            file_id = str(r.json()["id"])
+            if "/api/v1/files/" in file_id:
+                file_id = file_id.rsplit("/api/v1/files/", 1)[1].split("/", 1)[0]
+            return file_id
 
     async def get_latest_assistant_text(self, chat_id: str) -> str:
         """Read the latest assistant text from a saved chat."""
