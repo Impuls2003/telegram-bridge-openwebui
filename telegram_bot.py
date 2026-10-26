@@ -29,6 +29,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -112,6 +113,16 @@ def chunk_message(text: str, max_len: int = 3500) -> list[str]:
         chunks.append(remaining[:split_at].rstrip())
         remaining = remaining[split_at:].lstrip()
     return chunks
+
+
+def image_file_ref(file_id: str) -> dict[str, str]:
+    """Build an Open WebUI chat reference for an uploaded image."""
+    return {
+        "type": "image",
+        "id": file_id,
+        "url": f"/api/v1/files/{file_id}/content",
+        "content_type": "image/jpeg",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +223,9 @@ class OpenWebUI:
             "models": [model] if model else [],
             "timestamp": now,
         }
-        if file_ids:
-            user_msg["files"] = [{"type": "file", "id": fid} for fid in file_ids]
+        image_files = [image_file_ref(fid) for fid in (file_ids or [])]
+        if image_files:
+            user_msg["files"] = image_files
 
         history: dict[str, dict[str, Any]] = {
             user_msg_id: user_msg,
@@ -237,7 +249,7 @@ class OpenWebUI:
                 "title": content[:50] + ("…" if len(content) > 50 else ""),
                 "models": [model] if model else [],
                 "params": {},
-                "files": [{"type": "file", "id": fid} for fid in (file_ids or [])],
+                "files": image_files,
                 "history": {"messages": history, "currentId": assistant_msg_id},
                 "messages": [
                     {
@@ -246,6 +258,7 @@ class OpenWebUI:
                         "content": content,
                         "models": [model] if model else [],
                         "childrenIds": [assistant_msg_id],
+                        **({"files": image_files} if image_files else {}),
                     },
                     {
                         "id": assistant_msg_id,
@@ -290,16 +303,23 @@ class OpenWebUI:
         file_ids: Optional[list[str]] = None,
         assistant_message_id: Optional[str] = None,
         user_message: Optional[dict[str, Any]] = None,
+        image_data_url: Optional[str] = None,
         stream: bool = False,
     ) -> Any:
         """
         Run a completion. If stream=True, returns an async iterator yielding text chunks.
         Otherwise returns the full assistant text.
         """
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": content})
+        user_content: Any = content
+        if image_data_url:
+            user_content = [
+                {"type": "text", "text": content},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ]
+        messages.append({"role": "user", "content": user_content})
 
         payload: dict[str, Any] = {
             "model": model,
@@ -313,7 +333,7 @@ class OpenWebUI:
         if user_message:
             payload["user_message"] = user_message
         if file_ids:
-            payload["files"] = [{"type": "file", "id": fid} for fid in file_ids]
+            payload["files"] = [image_file_ref(fid) for fid in file_ids]
 
         if stream:
             return self._stream(payload)
@@ -1114,6 +1134,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         file_bytes = bytes(await tg_file.download_as_bytearray())
         file_id = await owui.upload_file(file_bytes, f"tg-{photo.file_unique_id}.jpg")
         log.info("Uploaded photo, OWUI file_id=%s (%d bytes)", file_id, len(file_bytes))
+        image_data_url = "data:image/jpeg;base64," + base64.b64encode(file_bytes).decode("ascii")
 
         chat_id, assistant_message_id, user_message = await owui.new_chat(
             model.name, caption, file_ids=[file_id],
@@ -1126,6 +1147,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             file_ids=[file_id],
             assistant_message_id=assistant_message_id,
             user_message=user_message,
+            image_data_url=image_data_url,
             stream=True,
         )
         await _stream_reply_to_telegram(update, chat_id, stream)
