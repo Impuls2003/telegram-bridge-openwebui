@@ -993,7 +993,7 @@ def _resolve_target_chat_id(update: Update, user_id: int) -> Optional[str]:
 
 async def _stream_reply_to_telegram(
     update: Update, chat_id: str, stream: AsyncIterator[str]
-) -> None:
+) -> Optional[int]:
     """Edit a placeholder message as tokens arrive, then chunk if needed.
 
     Returns the message_id of the LAST message sent (the backlink), so the
@@ -1159,7 +1159,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             image_data_url=image_data_url,
             stream=True,
         )
-        await _stream_reply_to_telegram(update, chat_id, stream)
+        last_tg_msg_id = await _stream_reply_to_telegram(update, chat_id, stream)
+        if last_tg_msg_id:
+            sessions.remember_last_outbound_for(
+                user.id, last_tg_msg_id, chat_id,
+            )
     except Exception as e:
         log.exception("Photo handling failed")
         await update.message.reply_text(
