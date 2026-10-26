@@ -193,10 +193,10 @@ class OpenWebUI:
         model: str,
         content: str,
         file_ids: Optional[list[str]] = None,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, dict[str, Any]]:
         """
         Create a chat with a user message and empty assistant placeholder.
-        Returns (chat_id, assistant_message_id).
+        Returns (server_chat_id, assistant_message_id, user_message).
         """
         chat_id = str(uuid.uuid4())
         user_msg_id = str(uuid.uuid4())
@@ -209,6 +209,7 @@ class OpenWebUI:
             "childrenIds": [assistant_msg_id],
             "role": "user",
             "content": content,
+            "models": [model] if model else [],
             "timestamp": now,
         }
         if file_ids:
@@ -223,6 +224,9 @@ class OpenWebUI:
                 "role": "assistant",
                 "content": "",
                 "model": model,
+                "modelName": model,
+                "modelIdx": 0,
+                "done": False,
                 "timestamp": now,
             },
         }
@@ -236,8 +240,24 @@ class OpenWebUI:
                 "files": [{"type": "file", "id": fid} for fid in (file_ids or [])],
                 "history": {"messages": history, "currentId": assistant_msg_id},
                 "messages": [
-                    {"id": user_msg_id, "role": "user", "content": content},
-                    {"id": assistant_msg_id, "role": "assistant", "content": ""},
+                    {
+                        "id": user_msg_id,
+                        "role": "user",
+                        "content": content,
+                        "models": [model] if model else [],
+                        "childrenIds": [assistant_msg_id],
+                    },
+                    {
+                        "id": assistant_msg_id,
+                        "role": "assistant",
+                        "content": "",
+                        "parentId": user_msg_id,
+                        "childrenIds": [],
+                        "model": model,
+                        "modelName": model,
+                        "modelIdx": 0,
+                        "done": False,
+                    },
                 ],
                 "tags": [],
                 "timestamp": now,
@@ -245,7 +265,21 @@ class OpenWebUI:
         }
         r = await self._client.post("/api/v1/chats/new", json=payload)
         r.raise_for_status()
-        return chat_id, assistant_msg_id
+        response_data = r.json()
+        server_chat_id = response_data.get("id")
+        if not server_chat_id:
+            server_chat_id = (response_data.get("chat") or {}).get("id")
+        if not server_chat_id:
+            raise RuntimeError(
+                "Open WebUI created a chat but returned no chat id; "
+                "cannot safely start completion"
+            )
+        if server_chat_id != chat_id:
+            log.info(
+                "Open WebUI assigned chat id %s (requested %s)",
+                server_chat_id, chat_id,
+            )
+        return str(server_chat_id), assistant_msg_id, user_msg
 
     async def complete(
         self,
@@ -254,6 +288,8 @@ class OpenWebUI:
         content: str,
         system_prompt: Optional[str] = None,
         file_ids: Optional[list[str]] = None,
+        assistant_message_id: Optional[str] = None,
+        user_message: Optional[dict[str, Any]] = None,
         stream: bool = False,
     ) -> Any:
         """
@@ -272,6 +308,10 @@ class OpenWebUI:
             "stream": stream,
             "metadata": {"chat_id": chat_id},
         }
+        if assistant_message_id:
+            payload["id"] = assistant_message_id
+        if user_message:
+            payload["user_message"] = user_message
         if file_ids:
             payload["files"] = [{"type": "file", "id": fid} for fid in file_ids]
 
@@ -917,11 +957,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 stream=True,
             )
         else:
-            chat_id, _ = await owui.new_chat(model.name, text)
+            chat_id, assistant_message_id, user_message = await owui.new_chat(
+                model.name, text
+            )
             sessions.update(user.id, chat_id=chat_id)
             stream = await owui.complete(
                 chat_id, model.name, text,
                 system_prompt=session.system_prompt,
+                assistant_message_id=assistant_message_id,
+                user_message=user_message,
                 stream=True,
             )
         last_tg_msg_id = await _stream_reply_to_telegram(update, chat_id, stream)
@@ -969,7 +1013,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         file_id = await owui.upload_file(file_bytes, f"tg-{photo.file_unique_id}.jpg")
         log.info("Uploaded photo, OWUI file_id=%s (%d bytes)", file_id, len(file_bytes))
 
-        chat_id, _ = await owui.new_chat(
+        chat_id, assistant_message_id, user_message = await owui.new_chat(
             model.name, caption, file_ids=[file_id],
         )
         sessions.update(user.id, chat_id=chat_id)
@@ -978,6 +1022,8 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id, model.name, caption,
             system_prompt=session.system_prompt,
             file_ids=[file_id],
+            assistant_message_id=assistant_message_id,
+            user_message=user_message,
             stream=True,
         )
         await _stream_reply_to_telegram(update, chat_id, stream)
