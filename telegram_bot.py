@@ -125,7 +125,8 @@ def image_file_ref(file_id: str) -> dict[str, str]:
     return {
         "type": "image",
         "id": file_id,
-        "url": f"/api/v1/files/{file_id}/content",
+        # Open WebUI's chat UI builds /api/v1/files/{url}/content itself.
+        "url": file_id,
         "content_type": "image/jpeg",
     }
 
