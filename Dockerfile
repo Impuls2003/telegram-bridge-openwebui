@@ -15,6 +15,7 @@ RUN pip install -r requirements.txt
 
 # Copy the bot code
 COPY telegram_bot.py ./
+COPY telegram_bridge/ ./telegram_bridge/
 
 # Pre-create the data dir the persistent sessions file lives in,
 # and hand ownership to the unprivileged 'bot' user.
