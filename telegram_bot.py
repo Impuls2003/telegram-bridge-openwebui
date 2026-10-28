@@ -898,11 +898,13 @@ async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @authorized
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    s = sessions.get(update.effective_user.id)
-    if not s.chat_id:
+    chat_id = sessions_new.get(
+        update.effective_user.id, "owui.current_chat_id"
+    )
+    if not chat_id:
         await update.message.reply_text("No active chat yet — send a message to start one.")
         return
-    url = f"{OPENWEBUI_BASE_URL}/c/{s.chat_id}"
+    url = f"{OPENWEBUI_BASE_URL}/c/{chat_id}"
     await update.message.reply_text(f"Current chat: {url}", disable_web_page_preview=True)
 
 
@@ -966,16 +968,14 @@ async def cmd_system(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 # ---------------------------------------------------------------------------
 def _resolve_target_chat_id(update: Update, user_id: int) -> Optional[str]:
     """
-    Decide which OWUI chat a Telegram message should be appended to.
+    Decide whether an incoming Telegram message continues the current OWUI chat.
 
     Priority:
-    1. Explicit Telegram reply to a known outbound message (from outbound map).
-    2. Explicit Telegram reply to any bot message AND we have a current chat.
-    3. Plain (non-reply) message BUT the bridge recently sent something on
-       the user's behalf within LAST_OUTBOUND_TTL_SECONDS — continue that chat.
-       This is the default behavior the user wants: send any text on Telegram,
-       bridge figures out the current chat from context.
-    4. Otherwise None → on_message will create a new chat.
+    1. An explicit reply to a Telegram message mapped to an OWUI chat uses
+       that chat.
+    2. Otherwise, continue the user's current OWUI chat only when the previous
+       incoming Telegram message was within LAST_OUTBOUND_TTL_SECONDS.
+    3. If neither condition applies, the caller creates a new chat.
     """
     msg = update.message
 
@@ -990,21 +990,25 @@ def _resolve_target_chat_id(update: Update, user_id: int) -> Optional[str]:
             )
             return mapped
 
-        sender = msg.reply_to_message.from_user
-        if sender and sender.is_bot:
-            session = sessions.get(user_id)
-            return session.chat_id
+    # Continue based on the time of the last incoming Telegram message.
+    last_message_at = sessions_new.get(
+        user_id, "from_telegram.last_message_at"
+    )
+    current_chat_id = sessions_new.get(user_id, "owui.current_chat_id")
+    if last_message_at is not None and current_chat_id:
+        age = msg.date.timestamp() - float(last_message_at)
+        if 0 <= age <= LAST_OUTBOUND_TTL_SECONDS:
+            log.info(
+                "Continuing current OWUI chat after Telegram message (age=%ds): %s",
+                int(age), current_chat_id,
+            )
+            return current_chat_id
 
-    # ---- (3): plain message, fall back to last outbound within TTL ----
-    last = sessions.get_last_outbound_for(user_id, LAST_OUTBOUND_TTL_SECONDS)
-    if last:
+    if last_message_at is not None:
         log.info(
-            "Routing plain message via last_outbound (tg_msg=%s, age=%ds): owui_chat=%s",
-            last.get("telegram_message_id"),
-            int(time.time() - float(last.get("ts", 0))),
-            last.get("owui_chat_id"),
+            "Starting a new OWUI chat (last Telegram message age=%ds)",
+            int(msg.date.timestamp() - float(last_message_at)),
         )
-        return last.get("owui_chat_id")
 
     return None
 
@@ -1078,12 +1082,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not text:
         return
 
-    sessions_new.set(
-        user.id, "from_telegram.last_message_at", update.message.date.timestamp()
-    )
     session = sessions.get(user.id)
     model = current_model()
     target_chat_id = _resolve_target_chat_id(update, user.id)
+    sessions_new.set(
+        user.id, "from_telegram.last_message_at", update.message.date.timestamp()
+    )
 
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
@@ -1117,6 +1121,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 stream=True,
             )
         else:
+            sessions_new.set(user.id, "owui.current_chat_id", None)
             chat_id, assistant_message_id, user_message = await owui.new_chat(
                 model.name, text
             )
@@ -1160,11 +1165,12 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download the largest photo, upload to OWUI, attach to a new chat."""
     user = update.effective_user
     caption = update.message.caption or "What's in this image?"
+    model = current_model()
+    session = sessions.get(user.id)
+    target_chat_id = _resolve_target_chat_id(update, user.id)
     sessions_new.set(
         user.id, "from_telegram.last_message_at", update.message.date.timestamp()
     )
-    model = current_model()
-    session = sessions.get(user.id)
 
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
@@ -1178,11 +1184,33 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("Uploaded photo, OWUI file_id=%s (%d bytes)", file_id, len(file_bytes))
         image_data_url = "data:image/jpeg;base64," + base64.b64encode(file_bytes).decode("ascii")
 
-        chat_id, assistant_message_id, user_message = await owui.new_chat(
-            model.name, caption, file_ids=[file_id],
-        )
-        sessions.update(user.id, chat_id=chat_id)
-        sessions_new.set(user.id, "owui.current_chat_id", chat_id)
+        if target_chat_id:
+            chat_id = target_chat_id
+            sessions.update(user.id, chat_id=chat_id)
+            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
+            parent_message_id = await owui.get_current_message_id(chat_id)
+            if not parent_message_id:
+                raise RuntimeError(
+                    f"Open WebUI chat {chat_id} has no active message to continue"
+                )
+            assistant_message_id = str(uuid.uuid4())
+            user_message = {
+                "id": str(uuid.uuid4()),
+                "parentId": parent_message_id,
+                "childrenIds": [assistant_message_id],
+                "role": "user",
+                "content": caption,
+                "models": [model.name],
+                "timestamp": int(time.time()),
+                "files": [image_file_ref(file_id)],
+            }
+        else:
+            sessions_new.set(user.id, "owui.current_chat_id", None)
+            chat_id, assistant_message_id, user_message = await owui.new_chat(
+                model.name, caption, file_ids=[file_id],
+            )
+            sessions.update(user.id, chat_id=chat_id)
+            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
 
         stream = await owui.complete(
             chat_id, model.name, caption,
