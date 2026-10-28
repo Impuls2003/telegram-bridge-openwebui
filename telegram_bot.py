@@ -18,7 +18,7 @@ Features:
 - Streaming responses with throttled message edits
 - Multi-message chunking for long replies
 - Image (photo) support via OWUI file upload
-- Per-chat system prompt (/system)
+- Per-user system prompt (/system)
 - Model switching at runtime (/model)
 - Persistent sessions across container restarts
 - Real HTTP /health endpoint for container orchestration
@@ -689,6 +689,14 @@ sessions = SessionStoreOLD(SESSIONS_FILE)
 sessions_new = SessionStore(SESSIONS_FILE + "new.json")
 
 
+def system_prompt_for_user(user_id: int) -> Optional[str]:
+    """Return the user's system prompt or the configured default prompt."""
+    prompt = sessions_new.get(user_id, "settings.system_prompt")
+    if prompt is None:
+        return DEFAULT_SYSTEM_PROMPT or None
+    return str(prompt)
+
+
 # ---------------------------------------------------------------------------
 # HTTP health + outbound server
 # ---------------------------------------------------------------------------
@@ -882,7 +890,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /newchat — start a fresh chat.\n"
         "• /id — show a link to the current chat.\n"
         "• /model [name] — show or switch the active model.\n"
-        "• /system [show|clear|<prompt>] — manage per-chat system prompt.\n"
+        "• /system [show|clear|<prompt>] — manage your system prompt.\n"
     )
 
 
@@ -942,20 +950,19 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_system(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
     user_id = update.effective_user.id
-    s = sessions.get(user_id)
 
     if not args or args[0].lower() == "show":
-        prompt = s.system_prompt or "(none — using OWUI default behavior)"
+        prompt = system_prompt_for_user(user_id) or "(none — using OWUI default behavior)"
         await update.message.reply_text(f"Current system prompt:\n\n{prompt}")
         return
 
     if args[0].lower() in ("clear", "reset", "none"):
-        sessions.update(user_id, clear_system_prompt=True)
-        await update.message.reply_text("✅ System prompt cleared.")
+        sessions_new.set(user_id, "settings.system_prompt", None)
+        await update.message.reply_text("✅ System prompt reset to the configured default.")
         return
 
     prompt = " ".join(args)
-    sessions.update(user_id, system_prompt=prompt)
+    sessions_new.set(user_id, "settings.system_prompt", prompt)
     await update.message.reply_text(
         f"✅ System prompt set. It will be applied to your next message:\n\n{prompt}"
     )
@@ -1074,7 +1081,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not text:
         return
 
-    session = sessions.get(user.id)
+    system_prompt = system_prompt_for_user(user.id)
     model = current_model()
     target_chat_id = _resolve_target_chat_id(update, user.id)
     sessions_new.set(
@@ -1106,7 +1113,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             }
             stream = await owui.complete(
                 chat_id, model.name, text,
-                system_prompt=session.system_prompt,
+                system_prompt=system_prompt,
                 assistant_message_id=assistant_message_id,
                 user_message=user_message,
                 stream=True,
@@ -1119,7 +1126,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             sessions_new.set(user.id, "owui.current_chat_id", chat_id)
             stream = await owui.complete(
                 chat_id, model.name, text,
-                system_prompt=session.system_prompt,
+                system_prompt=system_prompt,
                 assistant_message_id=assistant_message_id,
                 user_message=user_message,
                 stream=True,
@@ -1150,7 +1157,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     caption = update.message.caption or "What's in this image?"
     model = current_model()
-    session = sessions.get(user.id)
+    system_prompt = system_prompt_for_user(user.id)
     target_chat_id = _resolve_target_chat_id(update, user.id)
     sessions_new.set(
         user.id, "from_telegram.last_message_at", update.message.date.timestamp()
@@ -1196,7 +1203,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         stream = await owui.complete(
             chat_id, model.name, caption,
-            system_prompt=session.system_prompt,
+            system_prompt=system_prompt,
             file_ids=[file_id],
             assistant_message_id=assistant_message_id,
             user_message=user_message,
