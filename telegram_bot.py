@@ -820,26 +820,6 @@ class _BaseHandler(BaseHTTPRequestHandler):
         telegram_message_id = resp.json()["result"]["message_id"]
         # Remember the mapping so a Telegram reply routes back to the OWUI chat
         sessions.remember_outbound(telegram_message_id, chat_id)
-        sessions_new.set(
-            telegram_chat_id,
-            f"outbound_messages.{telegram_message_id}.user_id",
-            telegram_chat_id,
-        )
-        sessions_new.set(
-            telegram_chat_id,
-            f"outbound_messages.{telegram_message_id}.chat_id",
-            chat_id,
-        )
-        sessions_new.set(
-            telegram_chat_id,
-            f"outbound_messages.{telegram_message_id}.telegram_message_id",
-            telegram_message_id,
-        )
-        sessions_new.set(telegram_chat_id, "outbound.ts", time.time())
-        sessions_new.set(
-            telegram_chat_id, "outbound.telegram_message_id", telegram_message_id
-        )
-        sessions_new.set(telegram_chat_id, "outbound.chat_id", chat_id)
         log.info(
             "Outbound: telegram_msg_id=%s -> owui_chat_id=%s (%d chars)",
             telegram_message_id, chat_id, len(text),
@@ -911,8 +891,8 @@ async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     sessions.update(user_id, chat_id=None)
     sessions.clear_last_outbound_for(user_id)
-    sessions_new.set(user_id, "session.chat_id", None)
-    sessions_new.set(user_id, "outbound", {})
+    sessions_new.set(user_id, "owui.current_chat_id", None)
+    sessions_new.set(user_id, "from_telegram.last_message_at", None)
     await update.message.reply_text("🆕 Next message will start a fresh chat.")
 
 
@@ -950,7 +930,6 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         new_model = await resolve_model(specific=requested)
         set_current_model(new_model)
-        sessions_new.set(update.effective_user.id, "settings.model", new_model.name)
         await update.message.reply_text(
             f"✅ Switched to: `{new_model.name}`",
             parse_mode=ParseMode.MARKDOWN,
@@ -972,13 +951,11 @@ async def cmd_system(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if args[0].lower() in ("clear", "reset", "none"):
         sessions.update(user_id, clear_system_prompt=True)
-        sessions_new.set(user_id, "settings.system_prompt", None)
         await update.message.reply_text("✅ System prompt cleared.")
         return
 
     prompt = " ".join(args)
     sessions.update(user_id, system_prompt=prompt)
-    sessions_new.set(user_id, "settings.system_prompt", prompt)
     await update.message.reply_text(
         f"✅ System prompt set. It will be applied to your next message:\n\n{prompt}"
     )
@@ -1101,6 +1078,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not text:
         return
 
+    sessions_new.set(
+        user.id, "from_telegram.last_message_at", update.message.date.timestamp()
+    )
     session = sessions.get(user.id)
     model = current_model()
     target_chat_id = _resolve_target_chat_id(update, user.id)
@@ -1113,7 +1093,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if target_chat_id:
             chat_id = target_chat_id
             sessions.update(user.id, chat_id=chat_id)
-            sessions_new.set(user.id, "session.chat_id", chat_id)
+            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
             parent_message_id = await owui.get_current_message_id(chat_id)
             if not parent_message_id:
                 raise RuntimeError(
@@ -1141,7 +1121,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 model.name, text
             )
             sessions.update(user.id, chat_id=chat_id)
-            sessions_new.set(user.id, "session.chat_id", chat_id)
+            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
             stream = await owui.complete(
                 chat_id, model.name, text,
                 system_prompt=session.system_prompt,
@@ -1173,10 +1153,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         sessions.remember_last_outbound_for(
             user.id, last_tg_msg_id, chat_id,
         )
-        sessions_new.set(user.id, "outbound.ts", time.time())
-        sessions_new.set(user.id, "outbound.telegram_message_id", last_tg_msg_id)
-        sessions_new.set(user.id, "outbound.chat_id", chat_id)
-        sessions_new.set(user.id, "session.owui_message_id", assistant_message_id)
 
 
 @authorized
@@ -1184,6 +1160,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download the largest photo, upload to OWUI, attach to a new chat."""
     user = update.effective_user
     caption = update.message.caption or "What's in this image?"
+    sessions_new.set(
+        user.id, "from_telegram.last_message_at", update.message.date.timestamp()
+    )
     model = current_model()
     session = sessions.get(user.id)
 
@@ -1203,7 +1182,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             model.name, caption, file_ids=[file_id],
         )
         sessions.update(user.id, chat_id=chat_id)
-        sessions_new.set(user.id, "session.chat_id", chat_id)
+        sessions_new.set(user.id, "owui.current_chat_id", chat_id)
 
         stream = await owui.complete(
             chat_id, model.name, caption,
@@ -1219,10 +1198,6 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             sessions.remember_last_outbound_for(
                 user.id, last_tg_msg_id, chat_id,
             )
-            sessions_new.set(user.id, "outbound.ts", time.time())
-            sessions_new.set(user.id, "outbound.telegram_message_id", last_tg_msg_id)
-            sessions_new.set(user.id, "outbound.chat_id", chat_id)
-            sessions_new.set(user.id, "session.owui_message_id", assistant_message_id)
     except Exception as e:
         log.exception("Photo handling failed")
         await update.message.reply_text(
