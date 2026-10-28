@@ -7,9 +7,7 @@ import os
 
 
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
-OPENWEBUI_BASE_URL: str = os.environ.get(
-    "OPENWEBUI_BASE_URL", "http://localhost:3000"
-).rstrip("/")
+OPENWEBUI_BASE_URL: str = os.environ.get("OPENWEBUI_BASE_URL", "http://localhost:3000").rstrip("/")
 OPENWEBUI_API_KEY: str = os.environ["OPENWEBUI_API_KEY"]
 DEFAULT_MODEL: str = os.environ.get("DEFAULT_MODEL", "")
 DEFAULT_SYSTEM_PROMPT: str = os.environ.get("DEFAULT_SYSTEM_PROMPT", "")
