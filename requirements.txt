@@ -1,3 +1,4 @@
 python-telegram-bot[httpx]==21.10
+telegramify-markdown==1.4.0
 httpx==0.27.2
 requests==2.32.3

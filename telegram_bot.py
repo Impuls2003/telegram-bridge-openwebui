@@ -72,35 +72,11 @@ from telegram_bridge.config import (
     log,
 )
 from telegram_bridge.sessions import SessionStore
+from telegramify_markdown import split_entities
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def chunk_message(text: str, max_len: int = 3500) -> list[str]:
-    """
-    Split long text at paragraph / line / word boundaries.
-    Telegram's message cap is 4096 chars; we leave headroom for the backlink.
-    """
-    if len(text) <= max_len:
-        return [text]
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= max_len:
-            chunks.append(remaining)
-            break
-        split_at = remaining.rfind("\n\n", 0, max_len)
-        if split_at < max_len // 2:
-            split_at = remaining.rfind("\n", 0, max_len)
-        if split_at < max_len // 2:
-            split_at = remaining.rfind(" ", 0, max_len)
-        if split_at < max_len // 2:
-            split_at = max_len
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-    return chunks
-
-
 def image_file_ref(file_id: str) -> dict[str, str]:
     """Build an Open WebUI chat reference for an uploaded image."""
     # Some Open WebUI versions return the content URL in `id` rather than a
@@ -894,7 +870,12 @@ async def _stream_reply_to_telegram(
         await placeholder.edit_text("⚠️ Open WebUI returned no readable response text.")
         chunks = []
     else:
-        chunks = chunk_message(accumulated)
+        chunks = [
+            chunk_text
+            for chunk_text, _ in split_entities(
+                accumulated, [], max_utf16_len=3500
+            )
+        ]
         try:
             await placeholder.edit_text(chunks[0])
         except Exception as e:
