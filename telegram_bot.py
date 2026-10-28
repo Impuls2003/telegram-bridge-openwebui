@@ -889,8 +889,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    sessions.update(user_id, chat_id=None)
-    sessions.clear_last_outbound_for(user_id)
     sessions_new.set(user_id, "owui.current_chat_id", None)
     sessions_new.set(user_id, "from_telegram.last_message_at", None)
     await update.message.reply_text("🆕 Next message will start a fresh chat.")
@@ -1015,12 +1013,11 @@ def _resolve_target_chat_id(update: Update, user_id: int) -> Optional[str]:
 
 async def _stream_reply_to_telegram(
     update: Update, chat_id: str, stream: AsyncIterator[str]
-) -> Optional[int]:
+) -> None:
     """Edit a placeholder message as tokens arrive, then chunk if needed.
 
-    Returns a Telegram message id for the caller to record as the user's
-    "last outbound" for continuity. This is the backlink if enabled, otherwise
-    the final response message.
+    The Telegram message id is not needed for conversation continuity; that
+    is tracked by the user's current OWUI chat and incoming-message timestamp.
     """
     placeholder = await update.message.reply_text("…")
     accumulated = ""
@@ -1059,20 +1056,15 @@ async def _stream_reply_to_telegram(
             log.warning("Could not replace Telegram response placeholder: %s", e)
             await update.message.reply_text(chunks[0])
 
-    last_response_message_id = placeholder.message_id
     if chunks and len(chunks) > 1:
         for extra in chunks[1:]:
-            extra_msg = await update.message.reply_text(extra)
-            last_response_message_id = extra_msg.message_id
+            await update.message.reply_text(extra)
 
     if LINK_TO_CHAT_IN_EVERY_MESSAGE:
         chat_url = f"{OPENWEBUI_BASE_URL}/c/{chat_id}"
-        backlink_msg = await update.message.reply_text(
+        await update.message.reply_text(
             f"🔗 {chat_url}", disable_web_page_preview=True,
         )
-        return backlink_msg.message_id
-
-    return last_response_message_id
 
 
 @authorized
@@ -1096,7 +1088,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         if target_chat_id:
             chat_id = target_chat_id
-            sessions.update(user.id, chat_id=chat_id)
             sessions_new.set(user.id, "owui.current_chat_id", chat_id)
             parent_message_id = await owui.get_current_message_id(chat_id)
             if not parent_message_id:
@@ -1125,7 +1116,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             chat_id, assistant_message_id, user_message = await owui.new_chat(
                 model.name, text
             )
-            sessions.update(user.id, chat_id=chat_id)
             sessions_new.set(user.id, "owui.current_chat_id", chat_id)
             stream = await owui.complete(
                 chat_id, model.name, text,
@@ -1134,7 +1124,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 user_message=user_message,
                 stream=True,
             )
-        last_tg_msg_id = await _stream_reply_to_telegram(update, chat_id, stream)
+        await _stream_reply_to_telegram(update, chat_id, stream)
     except httpx.HTTPStatusError as e:
         log.exception("OWUI API error")
         snippet = (e.response.text[:300] if e.response is not None else str(e))
@@ -1152,12 +1142,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-    # Stamp this as the user's "last outbound" so a future plain (non-reply)
-    # message within LAST_OUTBOUND_TTL_SECONDS continues this chat.
-    if last_tg_msg_id:
-        sessions.remember_last_outbound_for(
-            user.id, last_tg_msg_id, chat_id,
-        )
 
 
 @authorized
@@ -1186,7 +1170,6 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if target_chat_id:
             chat_id = target_chat_id
-            sessions.update(user.id, chat_id=chat_id)
             sessions_new.set(user.id, "owui.current_chat_id", chat_id)
             parent_message_id = await owui.get_current_message_id(chat_id)
             if not parent_message_id:
@@ -1209,7 +1192,6 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id, assistant_message_id, user_message = await owui.new_chat(
                 model.name, caption, file_ids=[file_id],
             )
-            sessions.update(user.id, chat_id=chat_id)
             sessions_new.set(user.id, "owui.current_chat_id", chat_id)
 
         stream = await owui.complete(
@@ -1221,11 +1203,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             image_data_url=image_data_url,
             stream=True,
         )
-        last_tg_msg_id = await _stream_reply_to_telegram(update, chat_id, stream)
-        if last_tg_msg_id:
-            sessions.remember_last_outbound_for(
-                user.id, last_tg_msg_id, chat_id,
-            )
+        await _stream_reply_to_telegram(update, chat_id, stream)
     except Exception as e:
         log.exception("Photo handling failed")
         await update.message.reply_text(
