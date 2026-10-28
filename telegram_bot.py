@@ -454,7 +454,7 @@ owui = OpenWebUI(OPENWEBUI_BASE_URL, OPENWEBUI_API_KEY)
 @dataclass
 class ResolvedModel:
     name: str
-    source: str  # one of: "env", "user-settings", "first-available", "explicit"
+    source: str  # one of: "env", "user-settings", "first-available", "explicit", "user setting"
 
     def __str__(self) -> str:
         return f"{self.name} (from {self.source})"
@@ -664,6 +664,14 @@ sessions = SessionStoreOLD(SESSIONS_FILE)
 sessions_new = SessionStore(SESSIONS_FILE + "new.json")
 
 
+def model_for_user(user_id: int) -> ResolvedModel:
+    """Return the user's selected model or the configured default model."""
+    model_name = sessions_new.get(user_id, "settings.model")
+    if model_name:
+        return ResolvedModel(str(model_name), "user setting")
+    return current_model()
+
+
 def system_prompt_for_user(user_id: int) -> Optional[str]:
     """Return the user's system prompt or the configured default prompt."""
     prompt = sessions_new.get(user_id, "settings.system_prompt")
@@ -864,7 +872,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Send a photo with caption — image gets attached to a new chat.\n"
         "• /newchat — start a fresh chat.\n"
         "• /id — show a link to the current chat.\n"
-        "• /model [name] — show or switch the active model.\n"
+        "• /model [name|default] — show or switch your model.\n"
         "• /system [show|clear|<prompt>] — manage your system prompt.\n"
     )
 
@@ -892,6 +900,7 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 @authorized
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
+    user_id = update.effective_user.id
 
     if not args:
         try:
@@ -900,19 +909,29 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"❌ Could not list models: {e}")
             return
         model_lines = "\n".join(f"  • `{m.get('id')}`" for m in models[:25])
+        selected_model = model_for_user(user_id)
         await update.message.reply_text(
-            f"Current model: `{current_model().name}`\n"
-            f"Source: {current_model().source}\n\n"
+            f"Current model: `{selected_model.name}`\n"
+            f"Source: {selected_model.source}\n\n"
             f"Available models (first 25):\n{model_lines}\n\n"
-            f"Use `/model <name>` to switch.",
+            f"Use `/model <name>` to switch or `/model default` to reset.",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
 
     requested = args[0]
     try:
+        if requested.lower() in {"default", "reset"}:
+            sessions_new.set(user_id, "settings.model", None)
+            default_model = current_model()
+            await update.message.reply_text(
+                f"✅ Using the default model: `{default_model.name}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
         new_model = await resolve_model(specific=requested)
-        set_current_model(new_model)
+        sessions_new.set(user_id, "settings.model", new_model.name)
         await update.message.reply_text(
             f"✅ Switched to: `{new_model.name}`",
             parse_mode=ParseMode.MARKDOWN,
@@ -1057,7 +1076,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     system_prompt = system_prompt_for_user(user.id)
-    model = current_model()
+    model = model_for_user(user.id)
     target_chat_id = _resolve_target_chat_id(update, user.id)
     sessions_new.set(
         user.id, "from_telegram.last_message_at", update.message.date.timestamp()
@@ -1131,7 +1150,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download the largest photo, upload to OWUI, attach to a new chat."""
     user = update.effective_user
     caption = update.message.caption or "What's in this image?"
-    model = current_model()
+    model = model_for_user(user.id)
     system_prompt = system_prompt_for_user(user.id)
     target_chat_id = _resolve_target_chat_id(update, user.id)
     sessions_new.set(
