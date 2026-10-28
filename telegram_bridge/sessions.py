@@ -1,8 +1,6 @@
 """JSON-backed per-user state storage with dotted-path access.
 
-This store is intentionally independent from the legacy SessionStore in
-``telegram_bot.py``. It can be adopted by the bot separately when the new
-session format is ready.
+Per-user values are stored under dotted paths and saved to a JSON file.
 """
 
 from __future__ import annotations
@@ -54,15 +52,22 @@ class SessionStore:
         data.setdefault("users", {})
         return data
 
-    def get(self, user_id: int | str, path: str, default: Any = None) -> Any:
-        """Return a value at a dotted path, or ``default`` if it is absent."""
+    def get(
+        self,
+        user_id: int | str,
+        path: str,
+        default_value: Any = None,
+    ) -> Any:
+        """Return the value at a path, or ``default_value`` if absent or None."""
         parts = self._split_path(path)
         with self._lock:
             value: Any = self._data["users"].get(str(user_id), {})
             for part in parts:
                 if not isinstance(value, dict) or part not in value:
-                    return copy.deepcopy(default)
+                    return copy.deepcopy(default_value)
                 value = value[part]
+            if value is None:
+                return copy.deepcopy(default_value)
             return copy.deepcopy(value)
 
     def set(self, user_id: int | str, path: str, value: Any) -> None:

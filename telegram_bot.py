@@ -36,7 +36,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -460,10 +459,6 @@ class ResolvedModel:
         return f"{self.name} (from {self.source})"
 
 
-_current_model: Optional[ResolvedModel] = None
-_current_model_lock = threading.Lock()
-
-
 async def resolve_model(specific: Optional[str] = None) -> ResolvedModel:
     """
     Decide which model to use. Priority:
@@ -498,186 +493,28 @@ async def resolve_model(specific: Optional[str] = None) -> ResolvedModel:
     )
 
 
-def current_model() -> ResolvedModel:
-    if _current_model is None:
-        raise RuntimeError(
-            "No model resolved. Set DEFAULT_MODEL in .env, configure a default "
-            "in Open WebUI user settings, or ensure /api/models returns at "
-            "least one entry."
-        )
-    return _current_model
-
-
-def set_current_model(model: ResolvedModel) -> None:
-    global _current_model
-    with _current_model_lock:
-        _current_model = model
-
-
 # ---------------------------------------------------------------------------
-# Persistent session store
+# Persistent user store
 # ---------------------------------------------------------------------------
-@dataclass
-class UserSession:
-    chat_id: Optional[str] = None
-    system_prompt: Optional[str] = None
+sessions = SessionStore(SESSIONS_FILE)
 
 
-class SessionStoreOLD:
-    """
-    JSON-backed per-user session storage with atomic writes.
-
-    Stores two kinds of state:
-    - Per-user session: telegram_user_id -> { chat_id, system_prompt }
-    - Outbound message map: telegram_message_id -> owui_chat_id
-      (used to route Telegram replies back to the originating OWUI chat)
-    """
-
-    def __init__(self, path: str) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._data: dict[str, Any] = self._load()
-        # Ensure subkeys exist
-        self._data.setdefault("sessions", {})
-        self._data.setdefault("outbound", {})
-
-    def _load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"sessions": {}, "outbound": {}}
-        try:
-            data = json.loads(self.path.read_text())
-        except Exception as e:
-            log.warning("Could not load sessions from %s: %s", self.path, e)
-            return {"sessions": {}, "outbound": {}}
-
-        # One-time migration from v1.0/v1.1 format (root keys were user ids)
-        # to v1.2 format (everything nested under "sessions" / "outbound").
-        if not isinstance(data, dict):
-            return {"sessions": {}, "outbound": {}}
-        legacy = {
-            k: v for k, v in data.items()
-            if k not in ("sessions", "outbound")
-            and isinstance(v, dict)
-            and not v.get("outbound")  # avoid false positives
-        }
-        if legacy:
-            log.info("Migrating %d legacy session entries to v1.2 layout", len(legacy))
-            data.setdefault("sessions", {}).update(
-                {uid: {"chat_id": e.get("chat_id"), "system_prompt": e.get("system_prompt")}
-                 for uid, e in legacy.items()}
-            )
-            for k in legacy:
-                data.pop(k, None)
-        data.setdefault("sessions", {})
-        data.setdefault("outbound", {})
-        # Persist migration immediately so the file is clean from boot 1.
-        if legacy:
-            try:
-                tmp = self.path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data, indent=2))
-                tmp.replace(self.path)
-            except Exception as e:
-                log.warning("Could not persist migration: %s", e)
-        return data
-
-    def _save(self) -> None:
-        try:
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._data, indent=2))
-            tmp.replace(self.path)
-        except Exception as e:
-            log.warning("Could not save sessions: %s", e)
-
-    # ---- user sessions ----------------------------------------------------
-    def get(self, user_id: int) -> UserSession:
-        with self._lock:
-            entry = self._data["sessions"].setdefault(str(user_id), {})
-            return UserSession(
-                chat_id=entry.get("chat_id"),
-                system_prompt=entry.get("system_prompt") or DEFAULT_SYSTEM_PROMPT or None,
-            )
-
-    def update(self, user_id: int, *, chat_id: Optional[str] = None,
-               system_prompt: Optional[str] = None,
-               clear_system_prompt: bool = False) -> UserSession:
-        with self._lock:
-            entry = self._data["sessions"].setdefault(str(user_id), {})
-            if chat_id is not None:
-                entry["chat_id"] = chat_id
-            if clear_system_prompt:
-                entry["system_prompt"] = None
-            elif system_prompt is not None:
-                entry["system_prompt"] = system_prompt
-            self._save()
-            return UserSession(
-                chat_id=entry.get("chat_id"),
-                system_prompt=entry.get("system_prompt"),
-            )
-
-    # ---- outbound message map --------------------------------------------
-    def remember_outbound(self, telegram_message_id: int, owui_chat_id: str) -> None:
-        """Record that a Telegram message id was sent on behalf of an OWUI chat."""
-        with self._lock:
-            self._data["outbound"][str(telegram_message_id)] = owui_chat_id
-            self._save()
-
-    def lookup_outbound(self, telegram_message_id: int) -> Optional[str]:
-        """Return the OWUI chat id that produced this Telegram message, if any."""
-        with self._lock:
-            return self._data["outbound"].get(str(telegram_message_id))
-
-    def remember_last_outbound_for(
-        self, user_id: int, telegram_message_id: int, owui_chat_id: str
-    ) -> None:
-        """Stamp the user's last-outbound pointer (with current time)."""
-        with self._lock:
-            self._data.setdefault("last_outbound", {})
-            self._data["last_outbound"][str(user_id)] = {
-                "ts": time.time(),
-                "telegram_message_id": telegram_message_id,
-                "owui_chat_id": owui_chat_id,
-            }
-            self._save()
-
-    def get_last_outbound_for(
-        self, user_id: int, ttl_seconds: int
-    ) -> Optional[dict]:
-        """Return the user's most recent outbound message if within TTL, else None."""
-        with self._lock:
-            entry = self._data.get("last_outbound", {}).get(str(user_id))
-            if not entry:
-                return None
-            age = time.time() - float(entry.get("ts", 0))
-            if age > ttl_seconds:
-                return None
-            return entry
-
-    def clear_last_outbound_for(self, user_id: int) -> None:
-        """Used by /newchat to force the next message to start a fresh chat."""
-        with self._lock:
-            self._data.get("last_outbound", {}).pop(str(user_id), None)
-            self._save()
-
-
-sessions = SessionStoreOLD(SESSIONS_FILE)
-sessions_new = SessionStore(SESSIONS_FILE + "new.json")
-
-
-def model_for_user(user_id: int) -> ResolvedModel:
-    """Return the user's selected model or the configured default model."""
-    model_name = sessions_new.get(user_id, "settings.model")
+async def model_for_user(user_id: int) -> ResolvedModel:
+    """Return the user's selected model, resolving and saving a default on first use."""
+    model_name = sessions.get(user_id, "settings.model")
     if model_name:
         return ResolvedModel(str(model_name), "user setting")
-    return current_model()
 
+    model = await resolve_model()
+    # Resolving is async, so a /model command may have saved a choice
+    # while we were waiting. Keep that newer per-user choice if so.
+    model_name = sessions.get(user_id, "settings.model")
+    if model_name:
+        return ResolvedModel(str(model_name), "user setting")
 
-def system_prompt_for_user(user_id: int) -> Optional[str]:
-    """Return the user's system prompt or the configured default prompt."""
-    prompt = sessions_new.get(user_id, "settings.system_prompt")
-    if prompt is None:
-        return DEFAULT_SYSTEM_PROMPT or None
-    return str(prompt)
+    sessions.set(user_id, "settings.model", model.name)
+    log.info("Resolved default model for user %s: %s", user_id, model)
+    return ResolvedModel(model.name, "user setting")
 
 
 # ---------------------------------------------------------------------------
@@ -700,12 +537,10 @@ class _BaseHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)
         if self.path == "/health":
-            ready = _current_model is not None
             self._write_json(
-                200 if ready else 503,
+                200,
                 {
-                    "status": "ok" if ready else "starting",
-                    "model": str(_current_model) if _current_model else None,
+                    "status": "ok",
                     "outbound_endpoint": "ready",
                 },
             )
@@ -809,8 +644,12 @@ class _BaseHandler(BaseHTTPRequestHandler):
             return
 
         telegram_message_id = resp.json()["result"]["message_id"]
-        # Remember the mapping so a Telegram reply routes back to the OWUI chat
-        sessions.remember_outbound(telegram_message_id, chat_id)
+        # Remember the mapping so a Telegram reply routes back to the OWUI chat.
+        sessions.set(
+            telegram_chat_id,
+            f"to_telegram.messages.{telegram_message_id}.owui_chat_id",
+            chat_id,
+        )
         log.info(
             "Outbound: telegram_msg_id=%s -> owui_chat_id=%s (%d chars)",
             telegram_message_id, chat_id, len(text),
@@ -870,24 +709,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• Send any message — starts a new chat.\n"
         "• Reply to one of my messages — continues that chat.\n"
         "• Send a photo with caption — image gets attached to a new chat.\n"
-        "• /newchat — start a fresh chat.\n"
-        "• /id — show a link to the current chat.\n"
-        "• /model [name|default] — show or switch your model.\n"
-        "• /system [show|clear|<prompt>] — manage your system prompt.\n"
+        "• `/newchat` — start a fresh chat.\n"
+        "• `/id` — show a link to the current chat.\n"
+        "• `/model [name|default]` — show or switch your model.\n"
+        "• `/system [show|clear|<prompt>]` — manage your system prompt.\n",
+        parse_mode=ParseMode.MARKDOWN,
     )
 
 
 @authorized
 async def cmd_newchat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    sessions_new.set(user_id, "owui.current_chat_id", None)
-    sessions_new.set(user_id, "from_telegram.last_message_at", None)
+    sessions.set(user_id, "owui.current_chat_id", None)
+    sessions.set(user_id, "from_telegram.last_message_at", None)
     await update.message.reply_text("🆕 Next message will start a fresh chat.")
 
 
 @authorized
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = sessions_new.get(
+    chat_id = sessions.get(
         update.effective_user.id, "owui.current_chat_id"
     )
     if not chat_id:
@@ -905,11 +745,11 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not args:
         try:
             models = await owui.list_models()
+            selected_model = await model_for_user(user_id)
         except Exception as e:
             await update.message.reply_text(f"❌ Could not list models: {e}")
             return
         model_lines = "\n".join(f"  • `{m.get('id')}`" for m in models[:25])
-        selected_model = model_for_user(user_id)
         await update.message.reply_text(
             f"Current model: `{selected_model.name}`\n"
             f"Source: {selected_model.source}\n\n"
@@ -922,8 +762,8 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     requested = args[0]
     try:
         if requested.lower() in {"default", "reset"}:
-            sessions_new.set(user_id, "settings.model", None)
-            default_model = current_model()
+            sessions.set(user_id, "settings.model", None)
+            default_model = await model_for_user(user_id)
             await update.message.reply_text(
                 f"✅ Using the default model: `{default_model.name}`",
                 parse_mode=ParseMode.MARKDOWN,
@@ -931,7 +771,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         new_model = await resolve_model(specific=requested)
-        sessions_new.set(user_id, "settings.model", new_model.name)
+        sessions.set(user_id, "settings.model", new_model.name)
         await update.message.reply_text(
             f"✅ Switched to: `{new_model.name}`",
             parse_mode=ParseMode.MARKDOWN,
@@ -946,17 +786,17 @@ async def cmd_system(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = update.effective_user.id
 
     if not args or args[0].lower() == "show":
-        prompt = system_prompt_for_user(user_id) or "(none — using OWUI default behavior)"
+        prompt = sessions.get(user_id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or "(none — using OWUI default behavior)")
         await update.message.reply_text(f"Current system prompt:\n\n{prompt}")
         return
 
     if args[0].lower() in ("clear", "reset", "none"):
-        sessions_new.set(user_id, "settings.system_prompt", None)
+        sessions.set(user_id, "settings.system_prompt", None)
         await update.message.reply_text("✅ System prompt reset to the configured default.")
         return
 
     prompt = " ".join(args)
-    sessions_new.set(user_id, "settings.system_prompt", prompt)
+    sessions.set(user_id, "settings.system_prompt", prompt)
     await update.message.reply_text(
         f"✅ System prompt set. It will be applied to your next message:\n\n{prompt}"
     )
@@ -981,7 +821,11 @@ def _resolve_target_chat_id(update: Update, user_id: int) -> Optional[str]:
     # ---- (1) + (2): explicit Telegram reply ---------------------------
     if msg and msg.reply_to_message:
         reply_id = msg.reply_to_message.message_id
-        mapped = sessions.lookup_outbound(reply_id)
+        telegram_chat_id = update.effective_chat.id
+        mapped = sessions.get(
+            telegram_chat_id,
+            f"to_telegram.messages.{reply_id}.owui_chat_id",
+        )
         if mapped:
             log.info(
                 "Routing reply via outbound map: tg_msg=%s -> owui_chat=%s",
@@ -990,10 +834,10 @@ def _resolve_target_chat_id(update: Update, user_id: int) -> Optional[str]:
             return mapped
 
     # Continue based on the time of the last incoming Telegram message.
-    last_message_at = sessions_new.get(
+    last_message_at = sessions.get(
         user_id, "from_telegram.last_message_at"
     )
-    current_chat_id = sessions_new.get(user_id, "owui.current_chat_id")
+    current_chat_id = sessions.get(user_id, "owui.current_chat_id")
     if last_message_at is not None and current_chat_id:
         age = msg.date.timestamp() - float(last_message_at)
         if 0 <= age <= LAST_OUTBOUND_TTL_SECONDS:
@@ -1075,10 +919,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not text:
         return
 
-    system_prompt = system_prompt_for_user(user.id)
-    model = model_for_user(user.id)
+    system_prompt = sessions.get(user.id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or None)
     target_chat_id = _resolve_target_chat_id(update, user.id)
-    sessions_new.set(
+    sessions.set(
         user.id, "from_telegram.last_message_at", update.message.date.timestamp()
     )
 
@@ -1086,10 +929,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
     )
 
+    model: Optional[ResolvedModel] = None
     try:
+        model = await model_for_user(user.id)
         if target_chat_id:
             chat_id = target_chat_id
-            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
+            sessions.set(user.id, "owui.current_chat_id", chat_id)
             parent_message_id = await owui.get_current_message_id(chat_id)
             if not parent_message_id:
                 raise RuntimeError(
@@ -1113,11 +958,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 stream=True,
             )
         else:
-            sessions_new.set(user.id, "owui.current_chat_id", None)
+            sessions.set(user.id, "owui.current_chat_id", None)
             chat_id, assistant_message_id, user_message = await owui.new_chat(
                 model.name, text
             )
-            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
+            sessions.set(user.id, "owui.current_chat_id", chat_id)
             stream = await owui.complete(
                 chat_id, model.name, text,
                 system_prompt=system_prompt,
@@ -1129,17 +974,19 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except httpx.HTTPStatusError as e:
         log.exception("OWUI API error")
         snippet = (e.response.text[:300] if e.response is not None else str(e))
+        model_name = model.name if model else "unresolved"
         await update.message.reply_text(
             f"❌ Open WebUI returned `{e.response.status_code}`\n"
-            f"Model: `{model.name}`\n"
+            f"Model: `{model_name}`\n"
             f"Response: `{snippet}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
     except Exception as e:
         log.exception("Unhandled error")
+        model_name = model.name if model else "unresolved"
         await update.message.reply_text(
-            f"❌ {type(e).__name__}: {e}\nModel: `{model.name}`",
+            f"❌ {type(e).__name__}: {e}\nModel: `{model_name}`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
@@ -1150,10 +997,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Download the largest photo, upload to OWUI, attach to a new chat."""
     user = update.effective_user
     caption = update.message.caption or "What's in this image?"
-    model = model_for_user(user.id)
-    system_prompt = system_prompt_for_user(user.id)
+    system_prompt = sessions.get(user.id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or None)
     target_chat_id = _resolve_target_chat_id(update, user.id)
-    sessions_new.set(
+    sessions.set(
         user.id, "from_telegram.last_message_at", update.message.date.timestamp()
     )
 
@@ -1162,6 +1008,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     try:
+        model = await model_for_user(user.id)
         photo = update.message.photo[-1]
         tg_file = await context.bot.get_file(photo.file_id)
         file_bytes = bytes(await tg_file.download_as_bytearray())
@@ -1171,7 +1018,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if target_chat_id:
             chat_id = target_chat_id
-            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
+            sessions.set(user.id, "owui.current_chat_id", chat_id)
             parent_message_id = await owui.get_current_message_id(chat_id)
             if not parent_message_id:
                 raise RuntimeError(
@@ -1189,11 +1036,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "files": [image_file_ref(file_id)],
             }
         else:
-            sessions_new.set(user.id, "owui.current_chat_id", None)
+            sessions.set(user.id, "owui.current_chat_id", None)
             chat_id, assistant_message_id, user_message = await owui.new_chat(
                 model.name, caption, file_ids=[file_id],
             )
-            sessions_new.set(user.id, "owui.current_chat_id", chat_id)
+            sessions.set(user.id, "owui.current_chat_id", chat_id)
 
         stream = await owui.complete(
             chat_id, model.name, caption,
@@ -1215,33 +1062,6 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 # Lifecycle hooks & entry point
 # ---------------------------------------------------------------------------
-async def post_init(app: Application) -> None:
-    """
-    Resolve the model before the bot starts processing messages.
-
-    Resilient to transient failures: if user-settings lookup hangs/fails,
-    the resolver falls through to first-available or env var. Only raises
-    if absolutely nothing can be resolved, and even then we log + exit
-    cleanly rather than crash-looping forever.
-    """
-    log.info("Resolving model (env → user settings → first available)…")
-    try:
-        resolved = await resolve_model()
-        set_current_model(resolved)
-        log.info("✓ Model resolved: %s", resolved)
-    except Exception as e:
-        log.error("Model resolution failed: %s: %s", type(e).__name__, e or repr(e))
-        log.error(
-            "Set DEFAULT_MODEL in .env, or configure a default model in "
-            "Open WebUI user settings (Settings → Interface → Default Model)."
-        )
-        # Don't re-raise: that kills the container. Instead, leave the model
-        # unresolved so /health reports 503 and the operator gets a clear signal.
-        # Any incoming message will hit current_model() and raise a clear error
-        # instead of silently using a wrong model.
-        log.error("Bot will start but cannot serve messages until a model is resolvable.")
-
-
 def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
@@ -1262,7 +1082,6 @@ def main() -> None:
     app = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
         .build()
     )
 
