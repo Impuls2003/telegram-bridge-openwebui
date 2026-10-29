@@ -12,6 +12,7 @@ LANGUAGE_NAMES = {"en": "English", "ru": "Русский"}
 MESSAGES: dict[str, dict[str, str]] = {
     "en": {
         "start.help": "👋 Connected to your Open WebUI. Send a message or choose an action:",
+        "access.denied_start": "Access is not enabled for your account.\nYour Telegram ID: `{user_id}`\nAsk the bot administrator to add this ID to `ALLOWED_USER_IDS`.",
         "button.newchat": "🆕 New chat",
         "button.telegram_id": "🪪 My Telegram ID",
         "button.chat": "🔗 Current chat",
@@ -62,6 +63,7 @@ MESSAGES: dict[str, dict[str, str]] = {
     },
     "ru": {
         "start.help": "👋 Подключено к Open WebUI. Отправьте сообщение или выберите действие:",
+        "access.denied_start": "Для вашего аккаунта доступ не включён.\nВаш Telegram ID: `{user_id}`\nПопросите администратора бота добавить этот ID в `ALLOWED_USER_IDS`.",
         "button.newchat": "🆕 Новый чат",
         "button.telegram_id": "🪪 Мой Telegram ID",
         "button.chat": "🔗 Текущий чат",

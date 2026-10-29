@@ -191,9 +191,20 @@ class TelegramHandlers:
         return ResolvedModel(model.name, "user setting")
 
 
-    @authorized
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         language = self._language(update)
+        user = update.effective_user
+        if ALLOWED_USER_IDS and user.id not in ALLOWED_USER_IDS:
+            log.warning(
+                "Rejected unauthorized /start user id=%s username=%s",
+                user.id,
+                user.username,
+            )
+            await update.message.reply_text(
+                translate(language, "access.denied_start", user_id=user.id),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
         await update.message.reply_text(
             translate(language, "start.help"),
             parse_mode=ParseMode.MARKDOWN,
