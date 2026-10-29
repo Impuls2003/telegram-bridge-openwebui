@@ -23,6 +23,12 @@ from telegram_bridge.config import (
     STREAM_THROTTLE,
     log,
 )
+from telegram_bridge.i18n import (
+    LANGUAGE_NAMES,
+    SUPPORTED_LANGUAGES,
+    normalize_language,
+    translate,
+)
 from telegram_bridge.openwebui import OpenWebUI, image_file_ref
 from telegram_bridge.sessions import SessionStore
 from telegramify_markdown import split_entities
@@ -37,12 +43,17 @@ class ResolvedModel:
         return f"{self.name} (from {self.source})"
 
 
+class ModelNotAvailableError(ValueError):
+    """Raised when a requested model ID is not present in Open WebUI."""
+
+
 @dataclass
 class PreparedMessage:
     tg_user_id: int
     owui_model: ResolvedModel
     owui_system_prompt: Optional[str]
     owui_chat_id: Optional[str]
+    language: str
 
 
 def authorized(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -72,6 +83,18 @@ class TelegramHandlers:
         self.owui = owui
         self.sessions = sessions
 
+    def _language(self, update: Update) -> str:
+        """Get the user's selected language or detect it from Telegram."""
+        user = update.effective_user
+        language = self.sessions.get(user.id, "settings.language")
+        if isinstance(language, str) and language in SUPPORTED_LANGUAGES:
+            return language
+
+        detected = normalize_language(user.language_code)
+        if self.sessions.get(user.id, "settings.telegram_language") != detected:
+            self.sessions.set(user.id, "settings.telegram_language", detected)
+        return detected
+
     async def _resolve_model(self, specific: Optional[str] = None) -> ResolvedModel:
         """
         Decide which model to use. Priority:
@@ -84,7 +107,7 @@ class TelegramHandlers:
             models = await self.owui.list_models()
             valid_ids = {m.get("id") for m in models}
             if specific not in valid_ids:
-                raise ValueError(f"Model '{specific}' is not available in Open WebUI")
+                raise ModelNotAvailableError(specific)
             return ResolvedModel(specific, "explicit (/model command)")
 
         if DEFAULT_MODEL:
@@ -127,14 +150,7 @@ class TelegramHandlers:
     @authorized
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
-            "👋 Connected to your Open WebUI.\n\n"
-            "• Send any message — starts a new chat.\n"
-            "• Reply to one of my messages — continues that chat.\n"
-            "• Send a photo with caption — image gets attached to a new chat.\n"
-            "• `/newchat` — start a fresh chat.\n"
-            "• `/id` — show a link to the current chat.\n"
-            "• `/model [name|default]` — show or switch your model.\n"
-            "• `/system [show|clear|<prompt>]` — manage your system prompt.\n",
+            translate(self._language(update), "start.help"),
             parse_mode=ParseMode.MARKDOWN,
         )
 
@@ -144,39 +160,90 @@ class TelegramHandlers:
         user_id = update.effective_user.id
         self.sessions.set(user_id, "owui.current_chat_id", None)
         self.sessions.set(user_id, "from_telegram.last_message_at", None)
-        await update.message.reply_text("🆕 Next message will start a fresh chat.")
+        await update.message.reply_text(translate(self._language(update), "chat.new_next"))
 
 
     @authorized
     async def cmd_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        language = self._language(update)
         chat_id = self.sessions.get(
             update.effective_user.id, "owui.current_chat_id"
         )
         if not chat_id:
-            await update.message.reply_text("No active chat yet — send a message to start one.")
+            await update.message.reply_text(translate(language, "chat.none"))
             return
         url = f"{OPENWEBUI_BASE_URL}/c/{chat_id}"
-        await update.message.reply_text(f"Current chat: {url}", disable_web_page_preview=True)
+        await update.message.reply_text(
+            translate(language, "chat.current", url=url), disable_web_page_preview=True
+        )
+
+
+    @authorized
+    async def cmd_language(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        current_language = self._language(update)
+        args = context.args or []
+
+        if not args:
+            await update.message.reply_text(
+                translate(
+                    current_language,
+                    "language.current",
+                    language=LANGUAGE_NAMES[current_language],
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        requested = args[0].strip().lower()
+        if requested in {"default", "reset"}:
+            self.sessions.set(user_id, "settings.language", None)
+            language = self._language(update)
+            await update.message.reply_text(translate(language, "language.reset"))
+            return
+
+        if requested not in SUPPORTED_LANGUAGES:
+            await update.message.reply_text(
+                translate(current_language, "language.invalid"),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        self.sessions.set(user_id, "settings.language", requested)
+        await update.message.reply_text(translate(requested, "language.changed"))
 
 
     @authorized
     async def cmd_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         user_id = update.effective_user.id
+        language = self._language(update)
 
         if not args:
             try:
                 models = await self.owui.list_models()
                 selected_model = await self._model_for_user(user_id)
-            except Exception as e:
-                await update.message.reply_text(f"❌ Could not list models: {e}")
+            except Exception:
+                log.exception("Could not list models")
+                await update.message.reply_text(translate(language, "model.list_failed"))
                 return
             model_lines = "\n".join(f"  • `{m.get('id')}`" for m in models[:25])
+            source_keys = {
+                "user setting": "model.source.user",
+                "env DEFAULT_MODEL": "model.source.env",
+                "user settings (ui.models[0])": "model.source.owui",
+                "first from /api/models": "model.source.first",
+                "explicit (/model command)": "model.source.explicit",
+            }
+            source_key = source_keys.get(
+                selected_model.source, "model.source.user"
+            )
+            source = translate(language, source_key)
             await update.message.reply_text(
-                f"Current model: `{selected_model.name}`\n"
-                f"Source: {selected_model.source}\n\n"
-                f"Available models (first 25):\n{model_lines}\n\n"
-                f"Use `/model <name>` to switch or `/model default` to reset.",
+                f"{translate(language, 'model.current', model=selected_model.name)}\n"
+                f"{translate(language, 'model.source', source=source)}\n\n"
+                f"{translate(language, 'model.available')}\n{model_lines}\n\n"
+                f"{translate(language, 'model.usage')}",
                 parse_mode=ParseMode.MARKDOWN,
             )
             return
@@ -187,7 +254,7 @@ class TelegramHandlers:
                 self.sessions.set(user_id, "settings.model", None)
                 default_model = await self._model_for_user(user_id)
                 await update.message.reply_text(
-                    f"✅ Using the default model: `{default_model.name}`",
+                    translate(language, "model.default_set", model=default_model.name),
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 return
@@ -195,32 +262,44 @@ class TelegramHandlers:
             new_model = await self._resolve_model(specific=requested)
             self.sessions.set(user_id, "settings.model", new_model.name)
             await update.message.reply_text(
-                f"✅ Switched to: `{new_model.name}`",
+                translate(language, "model.switched", model=new_model.name),
                 parse_mode=ParseMode.MARKDOWN,
             )
         except Exception as e:
-            await update.message.reply_text(f"❌ Could not switch model: {e}")
+            if isinstance(e, ModelNotAvailableError):
+                error_text = translate(language, "model.unavailable", model=requested)
+            else:
+                log.exception("Could not switch model")
+                error_text = translate(language, "model.switch_failed")
+            await update.message.reply_text(error_text)
 
 
     @authorized
     async def cmd_system(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         user_id = update.effective_user.id
+        language = self._language(update)
 
         if not args or args[0].lower() == "show":
-            prompt = self.sessions.get(user_id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or "(none — using OWUI default behavior)")
-            await update.message.reply_text(f"Current system prompt:\n\n{prompt}")
+            prompt = self.sessions.get(
+                user_id,
+                "settings.system_prompt",
+                DEFAULT_SYSTEM_PROMPT or translate(language, "system.none"),
+            )
+            await update.message.reply_text(
+                translate(language, "system.current", prompt=prompt)
+            )
             return
 
         if args[0].lower() in ("clear", "reset", "none"):
             self.sessions.set(user_id, "settings.system_prompt", None)
-            await update.message.reply_text("✅ System prompt reset to the configured default.")
+            await update.message.reply_text(translate(language, "system.reset"))
             return
 
         prompt = " ".join(args)
         self.sessions.set(user_id, "settings.system_prompt", prompt)
         await update.message.reply_text(
-            f"✅ System prompt set. It will be applied to your next message:\n\n{prompt}"
+            translate(language, "system.set", prompt=prompt)
         )
 
 
@@ -279,7 +358,11 @@ class TelegramHandlers:
 
 
     async def _stream_reply_to_telegram(
-        self, update: Update, chat_id: str, stream: AsyncIterator[str]
+        self,
+        update: Update,
+        chat_id: str,
+        stream: AsyncIterator[str],
+        language: str,
     ) -> None:
         """Edit a placeholder message as tokens arrive, then chunk if needed.
 
@@ -313,7 +396,7 @@ class TelegramHandlers:
 
         if not accumulated.strip():
             log.error("No assistant text was available for Telegram (chat %s)", chat_id)
-            await placeholder.edit_text("⚠️ Open WebUI returned no readable response text.")
+            await placeholder.edit_text(translate(language, "stream.empty"))
             chunks = []
         else:
             chunks = [
@@ -344,6 +427,7 @@ class TelegramHandlers:
     ) -> PreparedMessage:
         """Resolve the settings and chat target shared by text and photo messages."""
         user = update.effective_user
+        language = self._language(update)
         system_prompt = self.sessions.get(user.id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or None)
         target_chat_id = self._resolve_target_chat_id(update, user.id)
         self.sessions.set(
@@ -359,6 +443,7 @@ class TelegramHandlers:
             owui_model=model,
             owui_system_prompt=system_prompt,
             owui_chat_id=target_chat_id,
+            language=language,
         )
 
 
@@ -413,7 +498,7 @@ class TelegramHandlers:
             image_data_url=image_data_url,
             stream=True,
         )
-        await self._stream_reply_to_telegram(update, chat_id, stream)
+        await self._stream_reply_to_telegram(update, chat_id, stream, prepared.language)
 
 
     @authorized
@@ -428,16 +513,18 @@ class TelegramHandlers:
         except Exception:
             log.exception("Message handling failed")
             await update.message.reply_text(
-                "❌ Failed to process message. Please try again later."
+                translate(self._language(update), "message.failed")
             )
 
 
     @authorized
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Download the largest photo and process it through the shared message flow."""
-        caption = update.message.caption or "What's in this image?"
         try:
             prepared = await self._prepare_message(update, context)
+            caption = update.message.caption or translate(
+                prepared.language, "photo.default_caption"
+            )
             photo = update.message.photo[-1]
             tg_file = await context.bot.get_file(photo.file_id)
             file_bytes = bytes(await tg_file.download_as_bytearray())
@@ -450,5 +537,5 @@ class TelegramHandlers:
         except Exception:
             log.exception("Photo handling failed")
             await update.message.reply_text(
-                "❌ Failed to process photo. Please try again later.",
+                translate(self._language(update), "photo.failed"),
             )

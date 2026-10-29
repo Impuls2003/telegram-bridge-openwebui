@@ -20,6 +20,7 @@ from telegram_bridge.config import (
     TELEGRAM_BOT_TOKEN,
     log,
 )
+from telegram_bridge.i18n import normalize_language, translate
 from telegram_bridge.sessions import SessionStore
 
 
@@ -97,9 +98,6 @@ class _BaseHandler(BaseHTTPRequestHandler):
         if title:
             parts.append(f"*{title}*\n")
         parts.append(message)
-        if include_backlink:
-            parts.append(f"\n🔗 Open conversation in Open WebUI →: {openwebui_url}/c/{chat_id}")
-        text = "\n".join(parts).strip()
 
         # Determine the Telegram recipient chat_id.
         # Priority: explicit telegram_chat_id in body > single ALLOWED_USER_IDS entry.
@@ -124,6 +122,21 @@ class _BaseHandler(BaseHTTPRequestHandler):
                 log.error("Outbound rejected: %s", err)
                 self._write_json(400, {"error": err})
                 return
+
+        if include_backlink:
+            language = self.sessions.get(telegram_chat_id, "settings.language")
+            if not isinstance(language, str) or language not in {"en", "ru"}:
+                language = self.sessions.get(
+                    telegram_chat_id, "settings.telegram_language", "en"
+                )
+            parts.append(
+                "\n" + translate(
+                    normalize_language(language),
+                    "outbound.backlink",
+                    url=f"{openwebui_url}/c/{chat_id}",
+                )
+            )
+        text = "\n".join(parts).strip()
 
         # Send via Telegram Bot API (sync, since we run in a thread)
         try:

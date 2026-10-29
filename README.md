@@ -43,6 +43,7 @@ The result: Telegram becomes a remote control for Open WebUI, and every chat you
 - 🖼️ **Image support** — send a photo on Telegram, it gets uploaded to OWUI and attached to a new chat
 - 🎯 **Per-chat system prompt** — `/system <prompt>` to scope behavior per Telegram chat
 - 🧠 **Per-session model switching** — `/model <name>` to change models mid-conversation
+- 🌐 **English and Russian interface** — follows your Telegram language by default; change it with `/language`
 - 💾 **Persistent sessions** — chat pointers survive container restarts via a JSON file
 - 🩺 **HTTP `/health` endpoint** — for Docker healthchecks, Uptime Kuma, K8s liveness probes
 - 🔒 **Per-user allowlist** — lock the bot to your Telegram user ID only
@@ -200,6 +201,9 @@ python telegram_bot.py
 | `/system show` | Show the active system prompt for this chat |
 | `/system <prompt>` | Set a system prompt for this chat (persists) |
 | `/system clear` | Remove the system prompt (use OWUI default) |
+| `/language` | Show the current bot language |
+| `/language en` or `/language ru` | Set the bot language |
+| `/language default` | Follow the Telegram language (English if unsupported) |
 
 ### Conversation flow
 

@@ -71,6 +71,7 @@ def main() -> None:
     app.add_handler(CommandHandler("id", handlers.cmd_id))
     app.add_handler(CommandHandler("model", handlers.cmd_model))
     app.add_handler(CommandHandler("system", handlers.cmd_system))
+    app.add_handler(CommandHandler("language", handlers.cmd_language))
     app.add_handler(MessageHandler(filters.PHOTO, handlers.on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_message))
 
