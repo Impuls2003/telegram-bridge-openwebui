@@ -100,8 +100,15 @@ class TelegramHandlers:
     def _main_menu_keyboard(language: str) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton(translate(language, "button.newchat"), callback_data="menu:newchat")],
-                [InlineKeyboardButton(translate(language, "button.model"), callback_data="menu:model")],
+                [
+                    InlineKeyboardButton(translate(language, "button.newchat"), callback_data="menu:newchat"),
+                    InlineKeyboardButton(translate(language, "button.chat"), callback_data="menu:chat"),
+                ],
+                [InlineKeyboardButton(translate(language, "button.telegram_id"), callback_data="menu:telegram_id")],
+                [
+                    InlineKeyboardButton(translate(language, "button.model"), callback_data="menu:model"),
+                    InlineKeyboardButton(translate(language, "button.system"), callback_data="menu:system"),
+                ],
                 [InlineKeyboardButton(translate(language, "button.language"), callback_data="menu:language")],
             ]
         )
@@ -118,6 +125,16 @@ class TelegramHandlers:
                     translate(language, "language.follow_telegram"),
                     callback_data="menu:language:default",
                 )],
+                [InlineKeyboardButton(translate(language, "button.back"), callback_data="menu:home")],
+            ]
+        )
+
+    @staticmethod
+    def _system_menu_keyboard(language: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(translate(language, "button.system_set"), callback_data="menu:system:set")],
+                [InlineKeyboardButton(translate(language, "button.system_reset"), callback_data="menu:system:reset")],
                 [InlineKeyboardButton(translate(language, "button.back"), callback_data="menu:home")],
             ]
         )
@@ -268,10 +285,33 @@ class TelegramHandlers:
         language = self._language(update)
         message_key = (query.message.chat.id, query.message.message_id)
         action = query.data or ""
+        if action != "menu:system:set":
+            context.user_data.pop("awaiting_system_prompt", None)
 
         if action == "menu:home":
             await query.edit_message_text(
                 translate(language, "start.help"),
+                reply_markup=self._main_menu_keyboard(language),
+            )
+            return
+
+        if action == "menu:chat":
+            chat_id = self.sessions.get(user_id, "owui.current_chat_id")
+            if chat_id:
+                url = f"{OPENWEBUI_BASE_URL}/c/{chat_id}"
+                text = translate(language, "chat.current", url=url)
+            else:
+                text = translate(language, "chat.none")
+            await query.edit_message_text(
+                text,
+                disable_web_page_preview=True,
+                reply_markup=self._main_menu_keyboard(language),
+            )
+            return
+
+        if action == "menu:telegram_id":
+            await query.edit_message_text(
+                translate(language, "telegram.id", user_id=user_id),
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=self._main_menu_keyboard(language),
             )
@@ -290,6 +330,36 @@ class TelegramHandlers:
             await query.edit_message_text(
                 translate(language, "language.menu_title"),
                 reply_markup=self._language_menu_keyboard(language),
+            )
+            return
+
+        if action == "menu:system":
+            prompt = self.sessions.get(
+                user_id,
+                "settings.system_prompt",
+                DEFAULT_SYSTEM_PROMPT or translate(language, "system.none"),
+            )
+            await query.edit_message_text(
+                translate(language, "system.current", prompt=prompt),
+                reply_markup=self._system_menu_keyboard(language),
+            )
+            return
+
+        if action == "menu:system:set":
+            context.user_data["awaiting_system_prompt"] = True
+            await query.edit_message_text(
+                translate(language, "system.enter_prompt"),
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(translate(language, "button.back"), callback_data="menu:system")]]
+                ),
+            )
+            return
+
+        if action == "menu:system:reset":
+            self.sessions.set(user_id, "settings.system_prompt", None)
+            await query.edit_message_text(
+                translate(language, "system.reset"),
+                reply_markup=self._main_menu_keyboard(language),
             )
             return
 
@@ -689,6 +759,16 @@ class TelegramHandlers:
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = update.message.text or ""
         if not text:
+            return
+
+        if context.user_data.pop("awaiting_system_prompt", False):
+            user_id = update.effective_user.id
+            language = self._language(update)
+            self.sessions.set(user_id, "settings.system_prompt", text)
+            await update.message.reply_text(
+                translate(language, "system.set", prompt=text),
+                reply_markup=self._main_menu_keyboard(language),
+            )
             return
 
         try:

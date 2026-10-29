@@ -11,19 +11,14 @@ LANGUAGE_NAMES = {"en": "English", "ru": "Русский"}
 
 MESSAGES: dict[str, dict[str, str]] = {
     "en": {
-        "start.help": (
-            "👋 Connected to your Open WebUI.\n\n"
-            "• Send any message to start or continue a chat.\n"
-            "• Reply to one of my messages to continue that chat.\n"
-            "• Send a photo with a caption to attach it to the chat.\n"
-            "• `/newchat` — start a fresh chat.\n"
-            "• `/id` — show a link to the current chat.\n"
-            "• `/model [name|default]` — show or switch your model.\n"
-            "• `/system [show|clear|<prompt>]` — manage your system prompt.\n"
-            "• `/language [en|ru|default]` — show or change the bot language."
-        ),
+        "start.help": "👋 Connected to your Open WebUI. Send a message or choose an action:",
         "button.newchat": "🆕 New chat",
+        "button.telegram_id": "🪪 My Telegram ID",
+        "button.chat": "🔗 Current chat",
         "button.model": "🤖 Model",
+        "button.system": "📝 System prompt",
+        "button.system_set": "✏️ Change prompt",
+        "button.system_reset": "↩️ Reset prompt",
         "button.language": "🌐 Language",
         "button.default_model": "Use default model",
         "button.back": "⬅️ Back",
@@ -33,6 +28,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.new_next": "🆕 The next message will start a fresh chat.",
         "chat.none": "No active chat yet — send a message to start one.",
         "chat.current": "Current chat: {url}",
+        "telegram.id": "Your Telegram ID: `{user_id}`",
         "model.list_failed": "❌ Could not list models. Please try again later.",
         "model.current": "Current model: `{model}`",
         "model.source": "Source: {source}",
@@ -49,6 +45,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "model.unavailable": "❌ Model `{model}` is not available in Open WebUI.",
         "system.current": "Current system prompt:\n\n{prompt}",
         "system.none": "(none — using Open WebUI default behavior)",
+        "system.enter_prompt": "Send the system prompt as your next text message.",
         "system.reset": "✅ System prompt reset to the configured default.",
         "system.set": "✅ System prompt set. It will be applied to your next message:\n\n{prompt}",
         "language.current": "Current language: {language}. Use `/language en` or `/language ru` to change it.",
@@ -64,19 +61,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "outbound.backlink": "🔗 Open conversation in Open WebUI →: {url}",
     },
     "ru": {
-        "start.help": (
-            "👋 Подключено к Open WebUI.\n\n"
-            "• Отправьте сообщение, чтобы начать или продолжить чат.\n"
-            "• Ответьте на моё сообщение, чтобы продолжить тот чат.\n"
-            "• Отправьте фото с подписью, чтобы прикрепить его к чату.\n"
-            "• `/newchat` — начать новый чат.\n"
-            "• `/id` — получить ссылку на текущий чат.\n"
-            "• `/model [имя|default]` — посмотреть или сменить модель.\n"
-            "• `/system [show|clear|<промпт>]` — настроить системный промпт.\n"
-            "• `/language [en|ru|default]` — посмотреть или сменить язык бота."
-        ),
+        "start.help": "👋 Подключено к Open WebUI. Отправьте сообщение или выберите действие:",
         "button.newchat": "🆕 Новый чат",
+        "button.telegram_id": "🪪 Мой Telegram ID",
+        "button.chat": "🔗 Текущий чат",
         "button.model": "🤖 Модель",
+        "button.system": "📝 Системный промпт",
+        "button.system_set": "✏️ Изменить промпт",
+        "button.system_reset": "↩️ Сбросить промпт",
         "button.language": "🌐 Язык",
         "button.default_model": "Модель по умолчанию",
         "button.back": "⬅️ Назад",
@@ -86,6 +78,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "chat.new_next": "🆕 Следующее сообщение начнёт новый чат.",
         "chat.none": "Активного чата пока нет — отправьте сообщение, чтобы начать.",
         "chat.current": "Текущий чат: {url}",
+        "telegram.id": "Ваш Telegram ID: `{user_id}`",
         "model.list_failed": "❌ Не удалось получить список моделей. Попробуйте позже.",
         "model.current": "Текущая модель: `{model}`",
         "model.source": "Источник: {source}",
@@ -102,6 +95,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "model.unavailable": "❌ Модель `{model}` недоступна в Open WebUI.",
         "system.current": "Текущий системный промпт:\n\n{prompt}",
         "system.none": "(не задан — используется поведение Open WebUI по умолчанию)",
+        "system.enter_prompt": "Отправьте системный промпт следующим текстовым сообщением.",
         "system.reset": "✅ Системный промпт сброшен к значению по умолчанию.",
         "system.set": "✅ Системный промпт задан. Он будет применён к следующему сообщению:\n\n{prompt}",
         "language.current": "Текущий язык: {language}. Для смены используйте `/language en` или `/language ru`.",
