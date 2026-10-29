@@ -56,13 +56,6 @@ class OpenWebUI:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def healthcheck(self) -> bool:
-        try:
-            r = await self._client.get("/api/models", timeout=5.0)
-            return r.status_code == 200
-        except Exception:
-            return False
-
     async def list_models(self) -> list[dict[str, Any]]:
         """Return available models (handles both flat and wrapped response shapes)."""
         r = await self._client.get("/api/models")

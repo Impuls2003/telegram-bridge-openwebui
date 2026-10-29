@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-import httpx
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
@@ -36,6 +35,14 @@ class ResolvedModel:
 
     def __str__(self) -> str:
         return f"{self.name} (from {self.source})"
+
+
+@dataclass
+class PreparedMessage:
+    tg_user_id: int
+    owui_model: ResolvedModel
+    owui_system_prompt: Optional[str]
+    owui_chat_id: Optional[str]
 
 
 def authorized(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
@@ -65,7 +72,7 @@ class TelegramHandlers:
         self.owui = owui
         self.sessions = sessions
 
-    async def resolve_model(self, specific: Optional[str] = None) -> ResolvedModel:
+    async def _resolve_model(self, specific: Optional[str] = None) -> ResolvedModel:
         """
         Decide which model to use. Priority:
         1. Explicit `specific` arg (from /model command)
@@ -77,7 +84,7 @@ class TelegramHandlers:
             models = await self.owui.list_models()
             valid_ids = {m.get("id") for m in models}
             if specific not in valid_ids:
-                log.warning("Model '%s' not in available list (proceeding anyway)", specific)
+                raise ValueError(f"Model '{specific}' is not available in Open WebUI")
             return ResolvedModel(specific, "explicit (/model command)")
 
         if DEFAULT_MODEL:
@@ -99,13 +106,13 @@ class TelegramHandlers:
         )
 
 
-    async def model_for_user(self, user_id: int) -> ResolvedModel:
+    async def _model_for_user(self, user_id: int) -> ResolvedModel:
         """Return the user's selected model, resolving and saving a default on first use."""
         model_name = self.sessions.get(user_id, "settings.model")
         if model_name:
             return ResolvedModel(str(model_name), "user setting")
 
-        model = await self.resolve_model()
+        model = await self._resolve_model()
         # Resolving is async, so a /model command may have saved a choice
         # while we were waiting. Keep that newer per-user choice if so.
         model_name = self.sessions.get(user_id, "settings.model")
@@ -160,7 +167,7 @@ class TelegramHandlers:
         if not args:
             try:
                 models = await self.owui.list_models()
-                selected_model = await self.model_for_user(user_id)
+                selected_model = await self._model_for_user(user_id)
             except Exception as e:
                 await update.message.reply_text(f"❌ Could not list models: {e}")
                 return
@@ -178,14 +185,14 @@ class TelegramHandlers:
         try:
             if requested.lower() in {"default", "reset"}:
                 self.sessions.set(user_id, "settings.model", None)
-                default_model = await self.model_for_user(user_id)
+                default_model = await self._model_for_user(user_id)
                 await update.message.reply_text(
                     f"✅ Using the default model: `{default_model.name}`",
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 return
 
-            new_model = await self.resolve_model(specific=requested)
+            new_model = await self._resolve_model(specific=requested)
             self.sessions.set(user_id, "settings.model", new_model.name)
             await update.message.reply_text(
                 f"✅ Switched to: `{new_model.name}`",
@@ -332,148 +339,116 @@ class TelegramHandlers:
             )
 
 
+    async def _prepare_message(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> PreparedMessage:
+        """Resolve the settings and chat target shared by text and photo messages."""
+        user = update.effective_user
+        system_prompt = self.sessions.get(user.id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or None)
+        target_chat_id = self._resolve_target_chat_id(update, user.id)
+        self.sessions.set(
+            user.id, "from_telegram.last_message_at", update.message.date.timestamp()
+        )
+
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, action=ChatAction.TYPING
+        )
+        model = await self._model_for_user(user.id)
+        return PreparedMessage(
+            tg_user_id=user.id,
+            owui_model=model,
+            owui_system_prompt=system_prompt,
+            owui_chat_id=target_chat_id,
+        )
+
+
+    async def _complete_message(
+        self,
+        update: Update,
+        prepared: PreparedMessage,
+        content: str,
+        file_id: Optional[str] = None,
+        image_data_url: Optional[str] = None,
+    ) -> None:
+        """Create or continue the OWUI chat, request a reply, and send it to Telegram."""
+        user_id = prepared.tg_user_id
+        model = prepared.owui_model
+        file_ids = [file_id] if file_id else None
+
+        if prepared.owui_chat_id:
+            chat_id = prepared.owui_chat_id
+            self.sessions.set(user_id, "owui.current_chat_id", chat_id)
+            parent_message_id = await self.owui.get_current_message_id(chat_id)
+            if not parent_message_id:
+                raise RuntimeError(
+                    f"Open WebUI chat {chat_id} has no active message to continue"
+                )
+            assistant_message_id = str(uuid.uuid4())
+            user_message = {
+                "id": str(uuid.uuid4()),
+                "parentId": parent_message_id,
+                "childrenIds": [assistant_message_id],
+                "role": "user",
+                "content": content,
+                "models": [model.name],
+                "timestamp": int(time.time()),
+            }
+            if file_id:
+                user_message["files"] = [image_file_ref(file_id)]
+        else:
+            self.sessions.set(user_id, "owui.current_chat_id", None)
+            chat_id, assistant_message_id, user_message = await self.owui.new_chat(
+                model.name, content, file_ids=file_ids,
+            )
+            self.sessions.set(user_id, "owui.current_chat_id", chat_id)
+
+        stream = await self.owui.complete(
+            chat_id,
+            model.name,
+            content,
+            system_prompt=prepared.owui_system_prompt,
+            file_ids=file_ids,
+            assistant_message_id=assistant_message_id,
+            user_message=user_message,
+            image_data_url=image_data_url,
+            stream=True,
+        )
+        await self._stream_reply_to_telegram(update, chat_id, stream)
+
+
     @authorized
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
         text = update.message.text or ""
         if not text:
             return
 
-        system_prompt = self.sessions.get(user.id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or None)
-        target_chat_id = self._resolve_target_chat_id(update, user.id)
-        self.sessions.set(
-            user.id, "from_telegram.last_message_at", update.message.date.timestamp()
-        )
-
-        await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id, action=ChatAction.TYPING
-        )
-
-        model: Optional[ResolvedModel] = None
         try:
-            model = await self.model_for_user(user.id)
-            if target_chat_id:
-                chat_id = target_chat_id
-                self.sessions.set(user.id, "owui.current_chat_id", chat_id)
-                parent_message_id = await self.owui.get_current_message_id(chat_id)
-                if not parent_message_id:
-                    raise RuntimeError(
-                        f"Open WebUI chat {chat_id} has no active message to continue"
-                    )
-                assistant_message_id = str(uuid.uuid4())
-                user_message = {
-                    "id": str(uuid.uuid4()),
-                    "parentId": parent_message_id,
-                    "childrenIds": [assistant_message_id],
-                    "role": "user",
-                    "content": text,
-                    "models": [model.name],
-                    "timestamp": int(time.time()),
-                }
-                stream = await self.owui.complete(
-                    chat_id, model.name, text,
-                    system_prompt=system_prompt,
-                    assistant_message_id=assistant_message_id,
-                    user_message=user_message,
-                    stream=True,
-                )
-            else:
-                self.sessions.set(user.id, "owui.current_chat_id", None)
-                chat_id, assistant_message_id, user_message = await self.owui.new_chat(
-                    model.name, text
-                )
-                self.sessions.set(user.id, "owui.current_chat_id", chat_id)
-                stream = await self.owui.complete(
-                    chat_id, model.name, text,
-                    system_prompt=system_prompt,
-                    assistant_message_id=assistant_message_id,
-                    user_message=user_message,
-                    stream=True,
-                )
-            await self._stream_reply_to_telegram(update, chat_id, stream)
-        except httpx.HTTPStatusError as e:
-            log.exception("OWUI API error")
-            snippet = (e.response.text[:300] if e.response is not None else str(e))
-            model_name = model.name if model else "unresolved"
+            prepared = await self._prepare_message(update, context)
+            await self._complete_message(update, prepared, text)
+        except Exception:
+            log.exception("Message handling failed")
             await update.message.reply_text(
-                f"❌ Open WebUI returned `{e.response.status_code}`\n"
-                f"Model: `{model_name}`\n"
-                f"Response: `{snippet}`",
-                parse_mode=ParseMode.MARKDOWN,
+                "❌ Failed to process message. Please try again later."
             )
-            return
-        except Exception as e:
-            log.exception("Unhandled error")
-            model_name = model.name if model else "unresolved"
-            await update.message.reply_text(
-                f"❌ {type(e).__name__}: {e}\nModel: `{model_name}`",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
 
 
     @authorized
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Download the largest photo, upload to OWUI, attach to a new chat."""
-        user = update.effective_user
+        """Download the largest photo and process it through the shared message flow."""
         caption = update.message.caption or "What's in this image?"
-        system_prompt = self.sessions.get(user.id, "settings.system_prompt", DEFAULT_SYSTEM_PROMPT or None)
-        target_chat_id = self._resolve_target_chat_id(update, user.id)
-        self.sessions.set(
-            user.id, "from_telegram.last_message_at", update.message.date.timestamp()
-        )
-
-        await context.bot.send_chat_action(
-            chat_id=update.effective_chat.id, action=ChatAction.TYPING
-        )
-
         try:
-            model = await self.model_for_user(user.id)
+            prepared = await self._prepare_message(update, context)
             photo = update.message.photo[-1]
             tg_file = await context.bot.get_file(photo.file_id)
             file_bytes = bytes(await tg_file.download_as_bytearray())
             file_id = await self.owui.upload_file(file_bytes, f"tg-{photo.file_unique_id}.jpg")
             log.info("Uploaded photo, OWUI file_id=%s (%d bytes)", file_id, len(file_bytes))
             image_data_url = "data:image/jpeg;base64," + base64.b64encode(file_bytes).decode("ascii")
-
-            if target_chat_id:
-                chat_id = target_chat_id
-                self.sessions.set(user.id, "owui.current_chat_id", chat_id)
-                parent_message_id = await self.owui.get_current_message_id(chat_id)
-                if not parent_message_id:
-                    raise RuntimeError(
-                        f"Open WebUI chat {chat_id} has no active message to continue"
-                    )
-                assistant_message_id = str(uuid.uuid4())
-                user_message = {
-                    "id": str(uuid.uuid4()),
-                    "parentId": parent_message_id,
-                    "childrenIds": [assistant_message_id],
-                    "role": "user",
-                    "content": caption,
-                    "models": [model.name],
-                    "timestamp": int(time.time()),
-                    "files": [image_file_ref(file_id)],
-                }
-            else:
-                self.sessions.set(user.id, "owui.current_chat_id", None)
-                chat_id, assistant_message_id, user_message = await self.owui.new_chat(
-                    model.name, caption, file_ids=[file_id],
-                )
-                self.sessions.set(user.id, "owui.current_chat_id", chat_id)
-
-            stream = await self.owui.complete(
-                chat_id, model.name, caption,
-                system_prompt=system_prompt,
-                file_ids=[file_id],
-                assistant_message_id=assistant_message_id,
-                user_message=user_message,
-                image_data_url=image_data_url,
-                stream=True,
+            await self._complete_message(
+                update, prepared, caption, file_id=file_id, image_data_url=image_data_url
             )
-            await self._stream_reply_to_telegram(update, chat_id, stream)
-        except Exception as e:
+        except Exception:
             log.exception("Photo handling failed")
             await update.message.reply_text(
-                f"❌ Failed to process image: {type(e).__name__}: {e}",
+                "❌ Failed to process photo. Please try again later.",
             )
