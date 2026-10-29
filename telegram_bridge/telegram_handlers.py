@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from functools import wraps
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
@@ -82,6 +82,7 @@ class TelegramHandlers:
     def __init__(self, owui: OpenWebUI, sessions: SessionStore) -> None:
         self.owui = owui
         self.sessions = sessions
+        self._model_menu_options: dict[tuple[int, int], list[str]] = {}
 
     def _language(self, update: Update) -> str:
         """Get the user's selected language or detect it from Telegram."""
@@ -94,6 +95,32 @@ class TelegramHandlers:
         if self.sessions.get(user.id, "settings.telegram_language") != detected:
             self.sessions.set(user.id, "settings.telegram_language", detected)
         return detected
+
+    @staticmethod
+    def _main_menu_keyboard(language: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(translate(language, "button.newchat"), callback_data="menu:newchat")],
+                [InlineKeyboardButton(translate(language, "button.model"), callback_data="menu:model")],
+                [InlineKeyboardButton(translate(language, "button.language"), callback_data="menu:language")],
+            ]
+        )
+
+    @staticmethod
+    def _language_menu_keyboard(language: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("English", callback_data="menu:language:en"),
+                    InlineKeyboardButton("Русский", callback_data="menu:language:ru"),
+                ],
+                [InlineKeyboardButton(
+                    translate(language, "language.follow_telegram"),
+                    callback_data="menu:language:default",
+                )],
+                [InlineKeyboardButton(translate(language, "button.back"), callback_data="menu:home")],
+            ]
+        )
 
     async def _resolve_model(self, specific: Optional[str] = None) -> ResolvedModel:
         """
@@ -149,9 +176,11 @@ class TelegramHandlers:
 
     @authorized
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        language = self._language(update)
         await update.message.reply_text(
-            translate(self._language(update), "start.help"),
+            translate(language, "start.help"),
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self._main_menu_keyboard(language),
         )
 
 
@@ -211,6 +240,161 @@ class TelegramHandlers:
 
         self.sessions.set(user_id, "settings.language", requested)
         await update.message.reply_text(translate(requested, "language.changed"))
+
+
+    async def on_callback_query(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Handle actions from the inline keyboard attached to /start."""
+        query = update.callback_query
+        if query is None:
+            return
+        user = update.effective_user
+        if ALLOWED_USER_IDS and (user is None or user.id not in ALLOWED_USER_IDS):
+            if user is not None:
+                log.warning(
+                    "Rejected unauthorized callback user id=%s username=%s",
+                    user.id,
+                    user.username,
+                )
+            await query.answer("Unauthorized", show_alert=True)
+            return
+        if query.message is None:
+            await query.answer()
+            return
+
+        await query.answer()
+        user_id = user.id
+        language = self._language(update)
+        message_key = (query.message.chat.id, query.message.message_id)
+        action = query.data or ""
+
+        if action == "menu:home":
+            await query.edit_message_text(
+                translate(language, "start.help"),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._main_menu_keyboard(language),
+            )
+            return
+
+        if action == "menu:newchat":
+            self.sessions.set(user_id, "owui.current_chat_id", None)
+            self.sessions.set(user_id, "from_telegram.last_message_at", None)
+            await query.edit_message_text(
+                translate(language, "chat.new_next"),
+                reply_markup=self._main_menu_keyboard(language),
+            )
+            return
+
+        if action == "menu:language":
+            await query.edit_message_text(
+                translate(language, "language.menu_title"),
+                reply_markup=self._language_menu_keyboard(language),
+            )
+            return
+
+        if action.startswith("menu:language:"):
+            requested = action.rsplit(":", 1)[-1]
+            if requested == "default":
+                self.sessions.set(user_id, "settings.language", None)
+                language = self._language(update)
+                text = translate(language, "language.reset")
+            elif requested in SUPPORTED_LANGUAGES:
+                self.sessions.set(user_id, "settings.language", requested)
+                language = requested
+                text = translate(language, "language.changed")
+            else:
+                text = translate(language, "language.invalid")
+            await query.edit_message_text(
+                text, reply_markup=self._main_menu_keyboard(language)
+            )
+            return
+
+        if action == "menu:model":
+            try:
+                models = await self.owui.list_models()
+            except Exception:
+                log.exception("Could not list models for inline menu")
+                await query.edit_message_text(
+                    translate(language, "model.list_failed"),
+                    reply_markup=self._main_menu_keyboard(language),
+                )
+                return
+
+            model_ids = [str(model["id"]) for model in models if model.get("id")][:25]
+            if not model_ids:
+                await query.edit_message_text(
+                    translate(language, "model.menu_empty"),
+                    reply_markup=self._main_menu_keyboard(language),
+                )
+                return
+
+            self._model_menu_options[message_key] = model_ids
+            while len(self._model_menu_options) > 50:
+                self._model_menu_options.pop(next(iter(self._model_menu_options)))
+            rows = [[
+                InlineKeyboardButton(
+                    model_id[:64], callback_data=f"menu:model_select:{index}"
+                )
+            ] for index, model_id in enumerate(model_ids)]
+            rows.insert(
+                0,
+                [InlineKeyboardButton(
+                    translate(language, "button.default_model"),
+                    callback_data="menu:model_default",
+                )],
+            )
+            rows.append(
+                [InlineKeyboardButton(translate(language, "button.back"), callback_data="menu:home")]
+            )
+            await query.edit_message_text(
+                translate(language, "model.menu_title"),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+
+        if action == "menu:model_default":
+            self.sessions.set(user_id, "settings.model", None)
+            try:
+                model = await self._model_for_user(user_id)
+                text = translate(language, "model.default_set", model=model.name)
+            except Exception:
+                log.exception("Could not resolve default model from inline menu")
+                text = translate(language, "model.switch_failed")
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._main_menu_keyboard(language),
+            )
+            return
+
+        if action.startswith("menu:model_select:"):
+            model_ids = self._model_menu_options.get(message_key, [])
+            try:
+                index = int(action.rsplit(":", 1)[-1])
+                requested_model = model_ids[index]
+            except (ValueError, IndexError):
+                await query.edit_message_text(
+                    translate(language, "model.menu_expired"),
+                    reply_markup=self._main_menu_keyboard(language),
+                )
+                return
+
+            try:
+                model = await self._resolve_model(specific=requested_model)
+                self.sessions.set(user_id, "settings.model", model.name)
+                text = translate(language, "model.switched", model=model.name)
+            except ModelNotAvailableError:
+                text = translate(language, "model.unavailable", model=requested_model)
+            except Exception:
+                log.exception("Could not switch model from inline menu")
+                text = translate(language, "model.switch_failed")
+            self._model_menu_options.pop(message_key, None)
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._main_menu_keyboard(language),
+            )
 
 
     @authorized

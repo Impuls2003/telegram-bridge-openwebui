@@ -7,6 +7,7 @@ import asyncio
 from telegram import Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -72,6 +73,7 @@ def main() -> None:
     app.add_handler(CommandHandler("model", handlers.cmd_model))
     app.add_handler(CommandHandler("system", handlers.cmd_system))
     app.add_handler(CommandHandler("language", handlers.cmd_language))
+    app.add_handler(CallbackQueryHandler(handlers.on_callback_query, pattern=r"^menu:"))
     app.add_handler(MessageHandler(filters.PHOTO, handlers.on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_message))
 
