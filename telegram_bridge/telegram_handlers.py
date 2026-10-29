@@ -14,6 +14,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
 from telegram_bridge.config import (
+    ADMINISTRATOR_ID,
     ALLOWED_USER_IDS,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
@@ -83,6 +84,7 @@ class TelegramHandlers:
         self.owui = owui
         self.sessions = sessions
         self._model_menu_options: dict[tuple[int, int], list[str]] = {}
+        self._access_requests: set[int] = set()
 
     def _language(self, update: Update) -> str:
         """Get the user's selected language or detect it from Telegram."""
@@ -203,6 +205,12 @@ class TelegramHandlers:
             await update.message.reply_text(
                 translate(language, "access.denied_start", user_id=user.id),
                 parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(
+                        translate(language, "access.request_button"),
+                        callback_data="menu:request_access",
+                    )]]
+                ),
             )
             return
         await update.message.reply_text(
@@ -278,6 +286,7 @@ class TelegramHandlers:
         if query is None:
             return
         user = update.effective_user
+        action = query.data or ""
         if ALLOWED_USER_IDS and (user is None or user.id not in ALLOWED_USER_IDS):
             if user is not None:
                 log.warning(
@@ -285,7 +294,41 @@ class TelegramHandlers:
                     user.id,
                     user.username,
                 )
-            await query.answer("Unauthorized", show_alert=True)
+            language = self._language(update)
+            if action == "menu:request_access" and user is not None:
+                if user.id in self._access_requests:
+                    await query.answer(translate(language, "access.request_already_sent"), show_alert=True)
+                    return
+                if ADMINISTRATOR_ID is None:
+                    log.error("Cannot send access request: ADMINISTRATOR_ID is not configured")
+                    await query.answer(translate(language, "access.admin_unconfigured"), show_alert=True)
+                    return
+
+                username = f"@{user.username}" if user.username else translate(language, "access.no_username")
+                self._access_requests.add(user.id)
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMINISTRATOR_ID,
+                        text=translate(
+                            language,
+                            "access.request_message",
+                            name=user.full_name,
+                            username=username,
+                            user_id=user.id,
+                        ),
+                    )
+                except Exception:
+                    self._access_requests.discard(user.id)
+                    log.exception("Could not send access request to administrator %s", ADMINISTRATOR_ID)
+                    await query.answer(translate(language, "access.request_failed"), show_alert=True)
+                    return
+
+                await query.answer()
+                if query.message is not None:
+                    await query.edit_message_text(translate(language, "access.request_sent"))
+                return
+
+            await query.answer(translate(language, "access.callback_denied"), show_alert=True)
             return
         if query.message is None:
             await query.answer()
@@ -295,7 +338,6 @@ class TelegramHandlers:
         user_id = user.id
         language = self._language(update)
         message_key = (query.message.chat.id, query.message.message_id)
-        action = query.data or ""
         if action != "menu:system:set":
             context.user_data.pop("awaiting_system_prompt", None)
 

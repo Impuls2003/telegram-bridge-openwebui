@@ -16,6 +16,9 @@ ALLOWED_USER_IDS: set[int] = {
     for user_id in os.environ.get("ALLOWED_USER_IDS", "").split(",")
     if user_id.strip()
 }
+ADMINISTRATOR_ID: int | None = (
+    int(value) if (value := os.environ.get("ADMINISTRATOR_ID", "").strip()) else None
+)
 CONNECTED_TOOLS: list[str] = list(
     dict.fromkeys(
         tool_id.strip()
