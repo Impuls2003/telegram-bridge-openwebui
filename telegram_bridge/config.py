@@ -8,14 +8,41 @@ import os
 
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENWEBUI_BASE_URL: str = os.environ.get("OPENWEBUI_BASE_URL", "http://localhost:3000").rstrip("/")
-OPENWEBUI_API_KEY: str = os.environ["OPENWEBUI_API_KEY"]
-DEFAULT_MODEL: str = os.environ.get("DEFAULT_MODEL", "")
-DEFAULT_SYSTEM_PROMPT: str = os.environ.get("DEFAULT_SYSTEM_PROMPT", "")
+OPENWEBUI_API_KEY: str = os.environ.get("OPENWEBUI_API_KEY", "").strip()
+OPENWEBUI_API_KEYS: dict[int, str] = {}
+for env_name, api_key in os.environ.items():
+    prefix = "OPENWEBUI_API_KEY_"
+    if not env_name.startswith(prefix):
+        continue
+
+    telegram_user_id = env_name[len(prefix) :]
+    if not telegram_user_id.isdecimal() or int(telegram_user_id) <= 0:
+        raise ValueError(
+            f"Invalid Telegram user ID in environment variable {env_name!r}"
+        )
+
+    api_key = api_key.strip()
+    if not api_key:
+        continue
+
+    user_id = int(telegram_user_id)
+    if user_id in OPENWEBUI_API_KEYS:
+        raise ValueError(
+            f"Multiple Open WebUI API keys configured for Telegram user {user_id}"
+        )
+    OPENWEBUI_API_KEYS[user_id] = api_key
+
 ALLOWED_USER_IDS: set[int] = {
     int(user_id)
     for user_id in os.environ.get("ALLOWED_USER_IDS", "").split(",")
     if user_id.strip()
 }
+
+if not OPENWEBUI_API_KEY:
+    raise RuntimeError("OPENWEBUI_API_KEY is required as the default Open WebUI account")
+
+DEFAULT_MODEL: str = os.environ.get("DEFAULT_MODEL", "")
+DEFAULT_SYSTEM_PROMPT: str = os.environ.get("DEFAULT_SYSTEM_PROMPT", "")
 ADMINISTRATOR_ID: int | None = (
     int(value) if (value := os.environ.get("ADMINISTRATOR_ID", "").strip()) else None
 )

@@ -9,7 +9,7 @@ Replies on Telegram appear in your real Open WebUI chat history — and vice ver
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![python-telegram-bot 21.x](https://img.shields.io/badge/python--telegram--bot-21.x-blue.svg)](https://docs.python-telegram-bot.org/)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](Dockerfile)
-[![v1.1.0](https://img.shields.io/badge/version-1.1.0-blue.svg)](CHANGELOG.md)
+[![v2.0.0](https://img.shields.io/badge/version-2.0.0-blue.svg)](CHANGELOG.md)
 
 [Features](#features) • [How it works](#how-it-works) • [Quick start](#quick-start) • [Configuration](#configuration) • [Commands](#commands) • [Troubleshooting](#troubleshooting)
 
@@ -158,7 +158,8 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from [@BotFather](https://t.me/BotFather) |
-| `OPENWEBUI_API_KEY` | ✅ | — | Open WebUI API key (Settings → Account → API Keys) |
+| `OPENWEBUI_API_KEY` | ✅ | — | Default Open WebUI API key; used when no personal key is configured |
+| `OPENWEBUI_API_KEY_<TG_ID>` | | — | Optional personal API key for a Telegram user, e.g. `OPENWEBUI_API_KEY_123456789`; overrides the default key for that user |
 | `OPENWEBUI_BASE_URL` | | `http://localhost:3000` | Base URL of your Open WebUI instance |
 | `DEFAULT_MODEL` | | auto | Model to use. If empty, uses OWUI user default → first available |
 | `DEFAULT_SYSTEM_PROMPT` | | (none) | Per-chat system prompt applied to every Telegram message |
@@ -337,6 +338,14 @@ docker pull nopenix/telegram-bridge-openwebui:latest
 ```
 
 ## Changelog
+
+### v2.0.0
+
+- **Per-user Open WebUI accounts** — a configured `OPENWEBUI_API_KEY_<TG_ID>` is
+  used for that Telegram user; users without a personal key use the default
+  `OPENWEBUI_API_KEY` account.
+- **Per-user Telegram routing** — updates are routed to the handler and Open WebUI
+  client associated with the sender's Telegram ID.
 
 ### v1.2.0
 - **`POST /api/outbound`** endpoint on the bridge — OWUI tool proxies here instead of calling Telegram directly

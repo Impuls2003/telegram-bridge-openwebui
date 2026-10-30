@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-29
+
+### Added
+- **Per-user Open WebUI API keys.** A Telegram user with a matching
+  `OPENWEBUI_API_KEY_<TG_ID>` uses that Open WebUI account. Users without a
+  personal key use the default `OPENWEBUI_API_KEY` account.
+- **Per-user Telegram update routing** through a dedicated handler router.
+
+### Changed
+- **Version banner** bumped to v2.0.0.
+
 ## [1.2.2] - 2026-06-27
 
 ### Fixed
@@ -100,6 +111,7 @@ is empty. Drop the new file into Workspace → Tools in Open WebUI, replacing v1
 - `/start`, `/newchat`, `/id`, `/model` commands.
 - Allowlist via `ALLOWED_USER_IDS`.
 
+[2.0.0]: #200---2026-10-29
 [1.2.0]: #120---2026-06-27
 [1.1.0]: #110---2026-06-27
 [1.0.0]: #100---2026-06-27

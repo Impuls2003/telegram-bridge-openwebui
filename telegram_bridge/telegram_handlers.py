@@ -6,16 +6,13 @@ import base64
 import time
 import uuid
 from dataclasses import dataclass
-from functools import wraps
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
 from telegram_bridge.config import (
-    ADMINISTRATOR_ID,
-    ALLOWED_USER_IDS,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     LAST_OUTBOUND_TTL_SECONDS,
@@ -57,26 +54,6 @@ class PreparedMessage:
     language: str
 
 
-def authorized(func: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable[Any]]:
-    @wraps(func)
-    async def wrapper(
-        self: TelegramHandlers,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-    ) -> Any:
-        user = update.effective_user
-        if ALLOWED_USER_IDS and user.id not in ALLOWED_USER_IDS:
-            log.warning(
-                "Rejected unauthorized user id=%s username=%s",
-                user.id,
-                user.username,
-            )
-            return None
-        return await func(self, update, context)
-
-    return wrapper
-
-
 class TelegramHandlers:
     """Telegram handlers with their Open WebUI and session dependencies."""
 
@@ -84,7 +61,6 @@ class TelegramHandlers:
         self.owui = owui
         self.sessions = sessions
         self._model_menu_options: dict[tuple[int, int], list[str]] = {}
-        self._access_requests: set[int] = set()
 
     def _language(self, update: Update) -> str:
         """Get the user's selected language or detect it from Telegram."""
@@ -195,24 +171,6 @@ class TelegramHandlers:
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         language = self._language(update)
-        user = update.effective_user
-        if ALLOWED_USER_IDS and user.id not in ALLOWED_USER_IDS:
-            log.warning(
-                "Rejected unauthorized /start user id=%s username=%s",
-                user.id,
-                user.username,
-            )
-            await update.message.reply_text(
-                translate(language, "access.denied_start", user_id=user.id),
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(
-                        translate(language, "access.request_button"),
-                        callback_data="menu:request_access",
-                    )]]
-                ),
-            )
-            return
         await update.message.reply_text(
             translate(language, "start.help"),
             parse_mode=ParseMode.MARKDOWN,
@@ -220,7 +178,6 @@ class TelegramHandlers:
         )
 
 
-    @authorized
     async def cmd_newchat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         self.sessions.set(user_id, "owui.current_chat_id", None)
@@ -228,7 +185,6 @@ class TelegramHandlers:
         await update.message.reply_text(translate(self._language(update), "chat.new_next"))
 
 
-    @authorized
     async def cmd_id(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         language = self._language(update)
         chat_id = self.sessions.get(
@@ -243,7 +199,6 @@ class TelegramHandlers:
         )
 
 
-    @authorized
     async def cmd_language(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         current_language = self._language(update)
@@ -287,49 +242,6 @@ class TelegramHandlers:
             return
         user = update.effective_user
         action = query.data or ""
-        if ALLOWED_USER_IDS and (user is None or user.id not in ALLOWED_USER_IDS):
-            if user is not None:
-                log.warning(
-                    "Rejected unauthorized callback user id=%s username=%s",
-                    user.id,
-                    user.username,
-                )
-            language = self._language(update)
-            if action == "menu:request_access" and user is not None:
-                if user.id in self._access_requests:
-                    await query.answer(translate(language, "access.request_already_sent"), show_alert=True)
-                    return
-                if ADMINISTRATOR_ID is None:
-                    log.error("Cannot send access request: ADMINISTRATOR_ID is not configured")
-                    await query.answer(translate(language, "access.admin_unconfigured"), show_alert=True)
-                    return
-
-                username = f"@{user.username}" if user.username else translate(language, "access.no_username")
-                self._access_requests.add(user.id)
-                try:
-                    await context.bot.send_message(
-                        chat_id=ADMINISTRATOR_ID,
-                        text=translate(
-                            language,
-                            "access.request_message",
-                            name=user.full_name,
-                            username=username,
-                            user_id=user.id,
-                        ),
-                    )
-                except Exception:
-                    self._access_requests.discard(user.id)
-                    log.exception("Could not send access request to administrator %s", ADMINISTRATOR_ID)
-                    await query.answer(translate(language, "access.request_failed"), show_alert=True)
-                    return
-
-                await query.answer()
-                if query.message is not None:
-                    await query.edit_message_text(translate(language, "access.request_sent"))
-                return
-
-            await query.answer(translate(language, "access.callback_denied"), show_alert=True)
-            return
         if query.message is None:
             await query.answer()
             return
@@ -520,7 +432,6 @@ class TelegramHandlers:
             )
 
 
-    @authorized
     async def cmd_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         user_id = update.effective_user.id
@@ -581,7 +492,6 @@ class TelegramHandlers:
             await update.message.reply_text(error_text)
 
 
-    @authorized
     async def cmd_system(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         args = context.args or []
         user_id = update.effective_user.id
@@ -808,7 +718,6 @@ class TelegramHandlers:
         await self._stream_reply_to_telegram(update, chat_id, stream, prepared.language)
 
 
-    @authorized
     async def on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = update.message.text or ""
         if not text:
@@ -834,7 +743,6 @@ class TelegramHandlers:
             )
 
 
-    @authorized
     async def on_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Download the largest photo and process it through the shared message flow."""
         try:
