@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -234,6 +235,8 @@ class OpenWebUI:
             "metadata": {"chat_id": chat_id},
             "features": {"web_search": self.web_search},
         }
+        if self.web_search:
+            payload["session_id"] = f"telegram-{uuid.uuid4()}"
         if assistant_message_id:
             payload["id"] = assistant_message_id
         if user_message:
@@ -250,6 +253,7 @@ class OpenWebUI:
         return r.json()["choices"][0]["message"]["content"]
 
     async def _stream(self, payload: dict[str, Any]) -> AsyncIterator[str]:
+        response_body = ""
         async with self._client.stream("POST", "/api/chat/completions", json=payload) as resp:
             if resp.is_error:
                 # Read the body so the existing HTTP error handler can show it.
@@ -257,6 +261,7 @@ class OpenWebUI:
             resp.raise_for_status()
             buffer = ""
             async for chunk in resp.aiter_text():
+                response_body += chunk
                 buffer += chunk
                 while "\n" in buffer:
                     line, buffer = buffer.split("\n", 1)
@@ -265,7 +270,7 @@ class OpenWebUI:
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
-                        return
+                        break
                     try:
                         obj = json.loads(data)
                         delta = obj["choices"][0].get("delta", {}).get("content", "")
@@ -286,6 +291,29 @@ class OpenWebUI:
                             yield delta
                     except (json.JSONDecodeError, KeyError, IndexError):
                         pass
+
+        # With session_id, current Open WebUI versions acknowledge native
+        # built-in tool requests with task IDs and finish them asynchronously.
+        try:
+            task_ids = json.loads(response_body).get("task_ids", [])
+        except (json.JSONDecodeError, AttributeError):
+            task_ids = []
+        if task_ids:
+            await self._wait_for_chat_tasks(payload["chat_id"])
+
+    async def _wait_for_chat_tasks(self, chat_id: str) -> None:
+        """Wait for Open WebUI's asynchronous native-tool tasks to finish."""
+        deadline = time.monotonic() + self.request_timeout
+        while time.monotonic() < deadline:
+            response = await self._client.get(f"/api/tasks/chat/{chat_id}")
+            response.raise_for_status()
+            if not response.json().get("task_ids"):
+                return
+            await asyncio.sleep(0.5)
+        raise TimeoutError(
+            f"Open WebUI tasks for chat {chat_id} did not finish within "
+            f"{self.request_timeout:g} seconds"
+        )
 
     async def upload_file(self, file_bytes: bytes, filename: str) -> str:
         """Upload a binary file to OWUI and return its file id."""
