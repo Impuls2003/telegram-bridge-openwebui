@@ -21,6 +21,7 @@ from telegram_bridge.config import (
     REQUEST_TIMEOUT,
     SESSIONS_FILE,
     TELEGRAM_BOT_TOKEN,
+    WEB_SEARCH,
     WEBHOOK_LISTEN,
     WEBHOOK_PORT,
     WEBHOOK_URL,
@@ -39,6 +40,7 @@ shared_owui = OpenWebUI(
     OPENWEBUI_API_KEY,
     REQUEST_TIMEOUT,
     CONNECTED_TOOLS,
+    WEB_SEARCH,
 )
 owui_clients.append(shared_owui)
 default_handlers = TelegramHandlers(shared_owui, sessions)
@@ -49,6 +51,7 @@ owui_by_user_id = {
         api_key,
         REQUEST_TIMEOUT,
         CONNECTED_TOOLS,
+        WEB_SEARCH,
     )
     for user_id, api_key in OPENWEBUI_API_KEYS.items()
 }

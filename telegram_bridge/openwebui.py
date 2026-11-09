@@ -38,11 +38,13 @@ class OpenWebUI:
         api_key: str,
         request_timeout: float,
         connected_tools: list[str],
+        web_search: bool,
     ) -> None:
         self.base_url = base_url
         self.api_key = api_key
         self.request_timeout = request_timeout
         self.connected_tools = connected_tools
+        self.web_search = web_search
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers={
@@ -230,6 +232,7 @@ class OpenWebUI:
             "chat_id": chat_id,
             "stream": stream,
             "metadata": {"chat_id": chat_id},
+            "features": {"web_search": self.web_search},
         }
         if assistant_message_id:
             payload["id"] = assistant_message_id

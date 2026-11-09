@@ -57,6 +57,10 @@ LINK_TO_CHAT_IN_EVERY_MESSAGE: bool = (
     os.environ.get("LINK_TO_CHAT_IN_EVERY_MESSAGE", "true").strip().lower()
     not in {"false", "0", "no", "off"}
 )
+WEB_SEARCH: bool = (
+    os.environ.get("WEB_SEARCH", "false").strip().lower()
+    not in {"false", "0", "no", "off"}
+)
 REQUEST_TIMEOUT: float = float(os.environ.get("REQUEST_TIMEOUT", "120"))
 SESSIONS_FILE: str = os.environ.get("SESSIONS_FILE", "/app/data/sessions.json")
 WEBHOOK_URL: str = os.environ.get("WEBHOOK_URL", "").rstrip("/")

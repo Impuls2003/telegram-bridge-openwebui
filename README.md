@@ -163,6 +163,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
 | `OPENWEBUI_BASE_URL` | | `http://localhost:3000` | Base URL of your Open WebUI instance |
 | `DEFAULT_MODEL` | | auto | Model to use. If empty, uses OWUI user default → first available |
 | `DEFAULT_SYSTEM_PROMPT` | | (none) | Per-chat system prompt applied to every Telegram message |
+| `WEB_SEARCH` | | `false` | Enable Open WebUI web search in Telegram chats; web search must also be enabled in Open WebUI |
 | `ALLOWED_USER_IDS` | ⭐ | (all) | Comma-separated Telegram user IDs. **Strongly recommended.** |
 | `REQUEST_TIMEOUT` | | `120` | HTTP timeout in seconds for OWUI API calls |
 | `SESSIONS_FILE` | | `/app/data/sessions.json` | Persistent session storage path |
